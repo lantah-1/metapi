@@ -384,4 +384,91 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     const wildcardRouteAfter = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, wildcardRoute.id)).get();
     expect(wildcardRouteAfter).toBeDefined();
   });
+
+  it('preserves switch groups while removing stale generated exact routes', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'switch-preserve-site',
+      url: 'https://switch-preserve.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'switch-user',
+      accessToken: 'session-token',
+      apiToken: 'sk-switch',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-switch-token',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id,
+      modelName: 'latest-model',
+      available: true,
+    }).run();
+
+    const staleRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'old-model',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: staleRoute.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).run();
+
+    const targetGroup = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'normal-target',
+      displayName: 'normal-target',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+
+    const switchGroup = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'custom_switch',
+      displayName: 'custom_switch',
+      routeMode: 'switch_group',
+      modelMapping: JSON.stringify({ activeSourceRouteId: targetGroup.id }),
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeGroupSources).values({
+      groupRouteId: switchGroup.id,
+      sourceRouteId: targetGroup.id,
+    }).run();
+
+    const rebuild = await rebuildTokenRoutesFromAvailability();
+
+    expect(rebuild.models).toBe(1);
+    expect(rebuild.removedRoutes).toBe(1);
+
+    const oldRoute = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, staleRoute.id)).get();
+    expect(oldRoute).toBeUndefined();
+
+    const restoredSwitchGroup = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, switchGroup.id)).get();
+    expect(restoredSwitchGroup).toEqual(expect.objectContaining({
+      modelPattern: 'custom_switch',
+      routeMode: 'switch_group',
+    }));
+
+    const restoredSwitchSources = await db.select().from(schema.routeGroupSources)
+      .where(eq(schema.routeGroupSources.groupRouteId, switchGroup.id))
+      .all();
+    expect(restoredSwitchSources).toEqual([
+      expect.objectContaining({ sourceRouteId: targetGroup.id }),
+    ]);
+  });
 });

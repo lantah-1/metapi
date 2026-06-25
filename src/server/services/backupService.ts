@@ -42,6 +42,7 @@ type SiteApiEndpointRow = typeof schema.siteApiEndpoints.$inferSelect;
 type AccountRow = typeof schema.accounts.$inferSelect;
 type AccountTokenRow = typeof schema.accountTokens.$inferSelect;
 type TokenRouteRow = typeof schema.tokenRoutes.$inferSelect;
+type RouteHeaderTemplateRow = typeof schema.routeHeaderTemplates.$inferSelect;
 type RouteChannelRow = typeof schema.routeChannels.$inferSelect;
 type RouteGroupSourceRow = typeof schema.routeGroupSources.$inferSelect;
 type SiteDisabledModelRow = typeof schema.siteDisabledModels.$inferSelect;
@@ -106,6 +107,7 @@ interface AccountsBackupSection {
   siteApiEndpoints?: SiteApiEndpointRow[];
   accounts: BackupAccountRow[];
   accountTokens: AccountTokenRow[];
+  routeHeaderTemplates?: RouteHeaderTemplateRow[];
   tokenRoutes: TokenRouteRow[];
   routeChannels: BackupRouteChannelRow[];
   routeGroupSources: RouteGroupSourceRow[];
@@ -1297,6 +1299,7 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
     siteApiEndpoints,
     accounts,
     accountTokens,
+    routeHeaderTemplates,
     tokenRoutes,
     routeChannels,
     routeGroupSources,
@@ -1314,6 +1317,7 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
       .all(),
     db.select().from(schema.accounts).orderBy(asc(schema.accounts.id)).all(),
     db.select().from(schema.accountTokens).orderBy(asc(schema.accountTokens.id)).all(),
+    db.select().from(schema.routeHeaderTemplates).orderBy(asc(schema.routeHeaderTemplates.id)).all(),
     db.select().from(schema.tokenRoutes).orderBy(asc(schema.tokenRoutes.id)).all(),
     db.select().from(schema.routeChannels).orderBy(asc(schema.routeChannels.id)).all(),
     db.select().from(schema.routeGroupSources).orderBy(asc(schema.routeGroupSources.id)).all(),
@@ -1332,6 +1336,7 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
     siteApiEndpoints,
     accounts: accounts.map(({ balanceUsed: _balanceUsed, lastCheckinAt: _lastCheckinAt, lastBalanceRefresh: _lastBalanceRefresh, ...row }) => row),
     accountTokens,
+    routeHeaderTemplates,
     tokenRoutes,
     routeChannels: routeChannels.map(({
       successCount: _successCount,
@@ -1415,6 +1420,9 @@ function coerceAccountsSection(input: unknown): AccountsBackupSection | null {
     : undefined;
   const accounts = Array.isArray(input.accounts) ? input.accounts as BackupAccountRow[] : null;
   const accountTokens = Array.isArray(input.accountTokens) ? input.accountTokens as AccountTokenRow[] : null;
+  const routeHeaderTemplates = Array.isArray(input.routeHeaderTemplates)
+    ? input.routeHeaderTemplates as RouteHeaderTemplateRow[]
+    : undefined;
   const tokenRoutes = Array.isArray(input.tokenRoutes) ? input.tokenRoutes as TokenRouteRow[] : null;
   const routeChannels = Array.isArray(input.routeChannels) ? input.routeChannels as BackupRouteChannelRow[] : null;
   const routeGroupSources = Array.isArray(input.routeGroupSources)
@@ -1437,6 +1445,7 @@ function coerceAccountsSection(input: unknown): AccountsBackupSection | null {
     siteApiEndpoints,
     accounts,
     accountTokens,
+    routeHeaderTemplates,
     tokenRoutes,
     routeChannels,
     routeGroupSources,
@@ -1524,6 +1533,7 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
   const shouldReplaceSiteDisabledModels = Array.isArray(section.siteDisabledModels);
   const shouldReplaceManualModels = Array.isArray(section.manualModels);
   const shouldReplaceDownstreamApiKeys = Array.isArray(section.downstreamApiKeys);
+  const shouldReplaceRouteHeaderTemplates = Array.isArray(section.routeHeaderTemplates);
 
   await db.transaction(async (tx) => {
     if (shouldReplaceDownstreamApiKeys) {
@@ -1533,6 +1543,9 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
     await tx.delete(schema.routeChannels).run();
     await tx.delete(schema.routeGroupSources).run();
     await tx.delete(schema.tokenRoutes).run();
+    if (shouldReplaceRouteHeaderTemplates) {
+      await tx.delete(schema.routeHeaderTemplates).run();
+    }
     await tx.delete(schema.tokenModelAvailability).run();
     await tx.delete(schema.modelAvailability).run();
     await tx.delete(schema.accountTokens).run();
@@ -1625,13 +1638,42 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
       }).run();
     }
 
+    const availableRouteHeaderTemplateIds = new Set<number>();
+    if (shouldReplaceRouteHeaderTemplates) {
+      for (const row of section.routeHeaderTemplates || []) {
+        await tx.insert(schema.routeHeaderTemplates).values({
+          id: row.id,
+          name: row.name,
+          description: row.description ?? null,
+          headers: row.headers,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        }).run();
+        availableRouteHeaderTemplateIds.add(row.id);
+      }
+    } else {
+      const existingTemplates = await tx.select({ id: schema.routeHeaderTemplates.id })
+        .from(schema.routeHeaderTemplates)
+        .all();
+      for (const row of existingTemplates) {
+        availableRouteHeaderTemplateIds.add(row.id);
+      }
+    }
+
     for (const row of section.tokenRoutes) {
+      const customHeaderTemplateId = typeof row.customHeaderTemplateId === 'number'
+        && availableRouteHeaderTemplateIds.has(row.customHeaderTemplateId)
+        ? row.customHeaderTemplateId
+        : null;
+
       await tx.insert(schema.tokenRoutes).values({
         id: row.id,
         modelPattern: row.modelPattern,
         displayName: row.displayName ?? null,
         displayIcon: row.displayIcon ?? null,
         modelMapping: row.modelMapping,
+        customHeaderTemplateId,
+        customHeaders: row.customHeaders ?? null,
         routeMode: row.routeMode ?? 'pattern',
         decisionSnapshot: row.decisionSnapshot ?? null,
         decisionRefreshedAt: row.decisionRefreshedAt ?? null,

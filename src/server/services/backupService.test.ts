@@ -30,6 +30,7 @@ describe('backupService', () => {
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.routeGroupSources).run();
     await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.routeHeaderTemplates).run();
     await db.delete(schema.tokenModelAvailability).run();
     await db.delete(schema.modelAvailability).run();
     await db.delete(schema.proxyLogs).run();
@@ -103,6 +104,16 @@ describe('backupService', () => {
       updatedAt: now,
     }).returning().get();
 
+    const headerTemplateHeaders = JSON.stringify({ 'x-template-header': 'roundtrip' });
+    const routeCustomHeaders = JSON.stringify({ 'x-route-header': 'override' });
+    const headerTemplate = await db.insert(schema.routeHeaderTemplates).values({
+      name: 'Roundtrip Headers',
+      description: 'template used by backup roundtrip',
+      headers: headerTemplateHeaders,
+      createdAt: now,
+      updatedAt: now,
+    }).returning().get();
+
     const sourceRoute = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'gpt-source-*',
       displayName: 'gpt-source',
@@ -117,6 +128,8 @@ describe('backupService', () => {
       displayName: 'gpt-route',
       displayIcon: 'icon-gpt',
       modelMapping: JSON.stringify({ to: 'gpt-4o-mini' }),
+      customHeaderTemplateId: headerTemplate.id,
+      customHeaders: routeCustomHeaders,
       routeMode: 'explicit_group',
       decisionSnapshot: JSON.stringify({ channelIds: [1, 2] }),
       decisionRefreshedAt: now,
@@ -213,6 +226,20 @@ describe('backupService', () => {
 
     const exported = await backupService.exportBackup('all') as any;
     expect(exported.version).toBe('2.1');
+    expect(exported.accounts.routeHeaderTemplates).toEqual([
+      expect.objectContaining({
+        id: headerTemplate.id,
+        name: 'Roundtrip Headers',
+        description: 'template used by backup roundtrip',
+        headers: headerTemplateHeaders,
+      }),
+    ]);
+    expect(exported.accounts.tokenRoutes.find((row: any) => row.id === route.id)).toEqual(
+      expect.objectContaining({
+        customHeaderTemplateId: headerTemplate.id,
+        customHeaders: routeCustomHeaders,
+      }),
+    );
     expect(exported.accounts.siteDisabledModels).toEqual([
       { siteId: site.id, modelName: 'gpt-hidden' },
     ]);
@@ -255,6 +282,12 @@ describe('backupService', () => {
     expect(exported.accounts.downstreamApiKeys[0]).not.toHaveProperty('usedRequests');
     expect(exported.accounts.downstreamApiKeys[0]).not.toHaveProperty('lastUsedAt');
 
+    await db.update(schema.tokenRoutes).set({
+      customHeaderTemplateId: null,
+      customHeaders: null,
+    }).where(eq(schema.tokenRoutes.id, route.id)).run();
+    await db.delete(schema.routeHeaderTemplates).run();
+
     const result = await backupService.importBackup(exported as Record<string, unknown>);
 
     expect(result.allImported).toBe(true);
@@ -265,6 +298,7 @@ describe('backupService', () => {
     const restoredSite = await db.select().from(schema.sites).where(eq(schema.sites.id, site.id)).get();
     const restoredAccount = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
     const restoredRoute = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).get();
+    const restoredHeaderTemplate = await db.select().from(schema.routeHeaderTemplates).where(eq(schema.routeHeaderTemplates.id, headerTemplate.id)).get();
     const restoredChannel = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.routeId, route.id)).get();
     const restoredDisabledModels = await db.select().from(schema.siteDisabledModels).all();
     const restoredModelAvailability = await db.select().from(schema.modelAvailability).all();
@@ -286,9 +320,16 @@ describe('backupService', () => {
     expect(restoredRoute?.displayName).toBe('gpt-route');
     expect(restoredRoute?.displayIcon).toBe('icon-gpt');
     expect(restoredRoute?.routeMode).toBe('explicit_group');
+    expect(restoredRoute?.customHeaderTemplateId).toBe(headerTemplate.id);
+    expect(restoredRoute?.customHeaders).toBe(routeCustomHeaders);
     expect(restoredRoute?.decisionSnapshot).toBe('{"channelIds":[1,2]}');
     expect(restoredRoute?.decisionRefreshedAt).toBe(now);
     expect(restoredRoute?.routingStrategy).toBe('round_robin');
+    expect(restoredHeaderTemplate).toEqual(expect.objectContaining({
+      name: 'Roundtrip Headers',
+      description: 'template used by backup roundtrip',
+      headers: headerTemplateHeaders,
+    }));
     const restoredGroupSource = await db.select().from(schema.routeGroupSources).where(eq(schema.routeGroupSources.groupRouteId, route.id)).get();
     expect(restoredGroupSource?.sourceRouteId).toBe(sourceRoute.id);
 

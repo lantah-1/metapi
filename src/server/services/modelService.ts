@@ -1143,7 +1143,10 @@ export async function rebuildTokenRoutesFromAvailability() {
   let removedRoutes = 0;
 
   for (const [modelName, candidateMap] of modelCandidates.entries()) {
-    let route = routes.find((r) => (r.routeMode || 'pattern') !== 'explicit_group' && r.modelPattern === modelName);
+    let route = routes.find((r) => {
+      const routeMode = r.routeMode || 'pattern';
+      return routeMode !== 'explicit_group' && routeMode !== 'switch_group' && r.modelPattern === modelName;
+    });
     if (!route) {
       const inserted = await db.insert(schema.tokenRoutes).values({
         modelPattern: modelName,
@@ -1210,7 +1213,8 @@ export async function rebuildTokenRoutesFromAvailability() {
 
   const latestModelNames = new Set<string>(Array.from(modelCandidates.keys()));
   for (const route of routes) {
-    if ((route.routeMode || 'pattern') === 'explicit_group') {
+    const routeMode = route.routeMode || 'pattern';
+    if (routeMode === 'explicit_group' || routeMode === 'switch_group') {
       continue;
     }
     const modelPattern = (route.modelPattern || '').trim();
