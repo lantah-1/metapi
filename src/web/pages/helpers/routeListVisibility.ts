@@ -1,4 +1,4 @@
-import { normalizeTokenRouteMode } from '../../../shared/tokenRouteContract.js';
+import { normalizeTokenRouteMode, type RouteMode } from '../../../shared/tokenRouteContract.js';
 
 export type RouteListVisibilityItem = {
   id: number;
@@ -9,12 +9,13 @@ export type RouteListVisibilityItem = {
   enabled: boolean;
 };
 
-function normalizeRouteMode(routeMode: string | null | undefined): 'pattern' | 'explicit_group' {
+function normalizeRouteMode(routeMode: string | null | undefined): RouteMode {
   return normalizeTokenRouteMode(routeMode);
 }
 
-function isExplicitGroupRoute(route: Pick<RouteListVisibilityItem, 'routeMode'>): boolean {
-  return normalizeRouteMode(route.routeMode) === 'explicit_group';
+function isPublicGroupRoute(route: Pick<RouteListVisibilityItem, 'routeMode'>): boolean {
+  const routeMode = normalizeRouteMode(route.routeMode);
+  return routeMode === 'explicit_group' || routeMode === 'switch_group';
 }
 
 function hasCustomDisplayName(route: Pick<RouteListVisibilityItem, 'modelPattern' | 'displayName'>): boolean {
@@ -30,22 +31,22 @@ export function buildVisibleRouteList<T extends RouteListVisibilityItem>(
 ): T[] {
   const exactModelNames = new Set(
     routes
-      .filter((route) => !isExplicitGroupRoute(route) && isExactModelPattern(route.modelPattern))
+      .filter((route) => !isPublicGroupRoute(route) && isExactModelPattern(route.modelPattern))
       .map((route) => (route.modelPattern || '').trim())
       .filter(Boolean),
   );
   const coveringGroups = routes.filter((route) => (
     route.enabled
     && (
-      (isExplicitGroupRoute(route) && ((route.displayName || '').trim().length > 0) && (route.sourceRouteIds || []).length > 0)
-      || (!isExplicitGroupRoute(route) && !isExactModelPattern(route.modelPattern) && hasCustomDisplayName(route))
+      (isPublicGroupRoute(route) && ((route.displayName || '').trim().length > 0) && (route.sourceRouteIds || []).length > 0)
+      || (!isPublicGroupRoute(route) && !isExactModelPattern(route.modelPattern) && hasCustomDisplayName(route))
     )
   ));
 
   if (coveringGroups.length === 0) return routes;
 
   return routes.filter((route) => {
-    if (isExplicitGroupRoute(route)) return true;
+    if (isPublicGroupRoute(route)) return true;
     if (!isExactModelPattern(route.modelPattern)) return true;
     if (hasCustomDisplayName(route)) return true;
 
@@ -56,8 +57,8 @@ export function buildVisibleRouteList<T extends RouteListVisibilityItem>(
       groupRoute.id !== route.id
       && !exactModelNames.has((groupRoute.displayName || '').trim())
       && (
-        (isExplicitGroupRoute(groupRoute) && (groupRoute.sourceRouteIds || []).includes(route.id))
-        || (!isExplicitGroupRoute(groupRoute) && matchesModelPattern(exactModel, groupRoute.modelPattern))
+        (isPublicGroupRoute(groupRoute) && (groupRoute.sourceRouteIds || []).includes(route.id))
+        || (!isPublicGroupRoute(groupRoute) && matchesModelPattern(exactModel, groupRoute.modelPattern))
       )
     ));
   });

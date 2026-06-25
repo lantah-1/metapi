@@ -2,6 +2,7 @@ import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import type { SiteProxyConfigLike } from '../../services/siteProxy.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
+import { mergeHeadersWithRouteCustomHeaders, type RouteCustomHeaderSource } from '../../services/routeCustomHeaders.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import type { DownstreamRoutingPolicy } from '../../services/downstreamPolicyTypes.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
@@ -53,6 +54,8 @@ type SurfaceOauthRefreshSelectedChannel = {
   };
   tokenValue: string;
 };
+
+type SurfaceRouteCustomHeaderSelectedChannel = RouteCustomHeaderSource;
 
 type SurfaceOauthRefreshContext<TRequest extends BuiltEndpointRequest> = {
   request: TRequest;
@@ -273,6 +276,16 @@ export function createSurfaceDispatchRequest(input: {
       }, channelProxyUrl),
     })
   );
+}
+
+export function withSelectedRouteCustomHeaders<TRequest extends BuiltEndpointRequest>(
+  selected: SurfaceRouteCustomHeaderSelectedChannel | null | undefined,
+  request: TRequest,
+): TRequest {
+  return {
+    ...request,
+    headers: mergeHeadersWithRouteCustomHeaders(selected, request.headers),
+  };
 }
 
 export async function trySurfaceOauthRefreshRecovery<TRequest extends BuiltEndpointRequest>(input: {

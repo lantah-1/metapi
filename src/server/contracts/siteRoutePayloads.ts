@@ -10,7 +10,6 @@ const siteCreatePayloadSchema = z.object({
   initializationPresetId: z.union([z.string(), z.null()]).optional(),
   proxyUrl: unknownField,
   useSystemProxy: unknownField,
-  customHeaders: unknownField,
   externalCheckinUrl: unknownField,
   status: unknownField,
   isPinned: unknownField,
@@ -24,7 +23,6 @@ const siteUpdatePayloadSchema = z.object({
   platform: requiredTrimmedString.optional(),
   proxyUrl: unknownField,
   useSystemProxy: unknownField,
-  customHeaders: unknownField,
   externalCheckinUrl: unknownField,
   status: unknownField,
   isPinned: unknownField,
@@ -37,10 +35,6 @@ const siteBatchPayloadSchema = z.object({
   action: z.string().optional(),
 }).passthrough();
 
-const siteDisabledModelsPayloadSchema = z.object({
-  models: z.array(z.string()).optional(),
-}).passthrough();
-
 const siteDetectPayloadSchema = z.object({
   url: requiredTrimmedString,
 }).passthrough();
@@ -48,7 +42,6 @@ const siteDetectPayloadSchema = z.object({
 export type SiteBatchPayload = z.output<typeof siteBatchPayloadSchema>;
 export type SiteCreatePayload = z.output<typeof siteCreatePayloadSchema>;
 export type SiteDetectPayload = z.output<typeof siteDetectPayloadSchema>;
-export type SiteDisabledModelsPayload = z.output<typeof siteDisabledModelsPayloadSchema>;
 export type SiteUpdatePayload = z.output<typeof siteUpdatePayloadSchema>;
 
 function normalizeSitePayloadInput(input: unknown): unknown {
@@ -74,9 +67,6 @@ function formatSitePayloadError(error: z.ZodError): string {
   }
   if (firstPath === 'action') {
     return 'Invalid action. Expected string.';
-  }
-  if (firstPath === 'models') {
-    return 'Invalid models. Expected string[].';
   }
   return 'Invalid site payload.';
 }
@@ -114,21 +104,6 @@ export function parseSiteUpdatePayload(input: unknown):
 export function parseSiteBatchPayload(input: unknown):
 { success: true; data: SiteBatchPayload } | { success: false; error: string } {
   const result = siteBatchPayloadSchema.safeParse(normalizeSitePayloadInput(input));
-  if (!result.success) {
-    return {
-      success: false,
-      error: formatSitePayloadError(result.error),
-    };
-  }
-  return {
-    success: true,
-    data: result.data,
-  };
-}
-
-export function parseSiteDisabledModelsPayload(input: unknown):
-{ success: true; data: SiteDisabledModelsPayload } | { success: false; error: string } {
-  const result = siteDisabledModelsPayloadSchema.safeParse(normalizeSitePayloadInput(input));
   if (!result.success) {
     return {
       success: false,

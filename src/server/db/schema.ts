@@ -144,6 +144,17 @@ export const tokenModelAvailability = sqliteTable('token_model_availability', {
   availableIdx: index('token_model_availability_available_idx').on(table.available),
 }));
 
+export const routeHeaderTemplates = sqliteTable('route_header_templates', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  description: text('description'),
+  headers: text('headers').notNull(),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  nameUnique: uniqueIndex('route_header_templates_name_unique').on(table.name),
+}));
+
 export const tokenRoutes = sqliteTable('token_routes', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   modelPattern: text('model_pattern').notNull(),
@@ -151,6 +162,8 @@ export const tokenRoutes = sqliteTable('token_routes', {
   displayIcon: text('display_icon'),
   routeMode: text('route_mode').default('pattern'),
   modelMapping: text('model_mapping'), // JSON
+  customHeaderTemplateId: integer('custom_header_template_id').references(() => routeHeaderTemplates.id, { onDelete: 'set null' }),
+  customHeaders: text('custom_headers'),
   decisionSnapshot: text('decision_snapshot'), // JSON
   decisionRefreshedAt: text('decision_refreshed_at'),
   routingStrategy: text('routing_strategy').default('weighted'),
@@ -160,6 +173,7 @@ export const tokenRoutes = sqliteTable('token_routes', {
 }, (table) => ({
   modelPatternIdx: index('token_routes_model_pattern_idx').on(table.modelPattern),
   enabledIdx: index('token_routes_enabled_idx').on(table.enabled),
+  customHeaderTemplateIdx: index('token_routes_custom_header_template_id_idx').on(table.customHeaderTemplateId),
 }));
 
 export const routeGroupSources = sqliteTable('route_group_sources', {

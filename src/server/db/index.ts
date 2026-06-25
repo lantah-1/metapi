@@ -30,6 +30,7 @@ const TABLES_WITH_NUMERIC_ID = new Set([
   'checkin_logs',
   'model_availability',
   'token_model_availability',
+  'route_header_templates',
   'token_routes',
   'route_group_sources',
   'route_channels',
@@ -501,6 +502,21 @@ function ensureRouteGroupingSchema() {
     return;
   }
 
+  execSqliteLegacyCompat(`
+    CREATE TABLE IF NOT EXISTS route_header_templates (
+      id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      name text NOT NULL,
+      description text,
+      headers text NOT NULL,
+      created_at text DEFAULT (datetime('now')),
+      updated_at text DEFAULT (datetime('now'))
+    );
+  `);
+  execSqliteLegacyCompat(`
+    CREATE UNIQUE INDEX IF NOT EXISTS route_header_templates_name_unique
+    ON route_header_templates(name);
+  `);
+
   if (!tableColumnExists('token_routes', 'display_name')) {
     execSqliteLegacyCompat(`ALTER TABLE token_routes ADD COLUMN display_name text;`);
   }
@@ -523,6 +539,14 @@ function ensureRouteGroupingSchema() {
 
   if (!tableColumnExists('token_routes', 'routing_strategy')) {
     execSqliteLegacyCompat(`ALTER TABLE token_routes ADD COLUMN routing_strategy text DEFAULT 'weighted';`);
+  }
+
+  if (!tableColumnExists('token_routes', 'custom_header_template_id')) {
+    execSqliteLegacyCompat(`ALTER TABLE token_routes ADD COLUMN custom_header_template_id integer REFERENCES route_header_templates(id) ON DELETE set null;`);
+  }
+
+  if (!tableColumnExists('token_routes', 'custom_headers')) {
+    execSqliteLegacyCompat(`ALTER TABLE token_routes ADD COLUMN custom_headers text;`);
   }
 
   if (!tableColumnExists('route_channels', 'source_model')) {

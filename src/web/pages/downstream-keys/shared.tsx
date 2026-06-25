@@ -15,14 +15,6 @@ export type SummaryItem = {
   usedCost: number;
   maxRequests: number | null;
   usedRequests: number;
-  supportedModels: string[];
-  allowedRouteIds: number[];
-  siteWeightMultipliers: Record<number, number>;
-  excludedSiteIds: number[];
-  excludedCredentialRefs: Array<
-    | { kind: 'account_token'; siteId: number; accountId: number; tokenId: number }
-    | { kind: 'default_api_key'; siteId: number; accountId: number }
-  >;
   lastUsedAt: string | null;
   createdAt: string | null;
   updatedAt: string | null;

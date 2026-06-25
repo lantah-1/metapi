@@ -193,7 +193,158 @@ describe('/v1/models route', () => {
     expect(body.data.map((item) => item.id)).toContain('global-routable-model');
   });
 
-  it('returns only whitelist models for managed key with supportedModels policy', async () => {
+  it('returns explicit model groups as downstream models', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'group-site',
+      url: 'https://group.example.com',
+      platform: 'openai',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'group-access-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'group-api-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const sourceA = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'openai/gpt-5.5',
+      enabled: true,
+    }).returning().get();
+    const sourceB = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'azure/gpt-5.5',
+      enabled: true,
+    }).returning().get();
+    const group = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.5',
+      displayName: 'gpt-5.5',
+      routeMode: 'explicit_group',
+      routingStrategy: 'stable_first',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeGroupSources).values([
+      { groupRouteId: group.id, sourceRouteId: sourceA.id },
+      { groupRouteId: group.id, sourceRouteId: sourceB.id },
+    ]).run();
+
+    await db.insert(schema.routeChannels).values([
+      {
+        routeId: sourceA.id,
+        accountId: account.id,
+        tokenId: token.id,
+        sourceModel: 'openai/gpt-5.5',
+        enabled: true,
+      },
+      {
+        routeId: sourceB.id,
+        accountId: account.id,
+        tokenId: token.id,
+        sourceModel: 'azure/gpt-5.5',
+        enabled: true,
+      },
+    ]).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: {
+        authorization: 'Bearer sk-global-proxy-token',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      object: 'list';
+      data: Array<{ id: string }>;
+    };
+    const ids = body.data.map((item) => item.id);
+    expect(ids).toContain('gpt-5.5');
+    expect(ids).not.toContain('openai/gpt-5.5');
+    expect(ids).not.toContain('azure/gpt-5.5');
+  });
+
+  it('returns switch groups as downstream models while hiding their source targets', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'switch-site',
+      url: 'https://switch.example.com',
+      platform: 'openai',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'switch-access-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'switch-api-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const source = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'openai/gpt-5.5',
+      enabled: true,
+    }).returning().get();
+    const explicitGroup = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.5',
+      displayName: 'gpt-5.5',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+    const switchGroup = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'custom',
+      displayName: 'custom',
+      routeMode: 'switch_group',
+      modelMapping: JSON.stringify({ activeSourceRouteId: explicitGroup.id }),
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeGroupSources).values([
+      { groupRouteId: explicitGroup.id, sourceRouteId: source.id },
+      { groupRouteId: switchGroup.id, sourceRouteId: explicitGroup.id },
+    ]).run();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: source.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'openai/gpt-5.5',
+      enabled: true,
+    }).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: {
+        authorization: 'Bearer sk-global-proxy-token',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      object: 'list';
+      data: Array<{ id: string }>;
+    };
+    const ids = body.data.map((item) => item.id);
+    expect(ids).toContain('custom');
+    expect(ids).toContain('gpt-5.5');
+    expect(ids).not.toContain('openai/gpt-5.5');
+  });
+
+  it('ignores legacy managed key supportedModels policy when listing routable models', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'test-site',
       url: 'https://upstream.example.com',
@@ -276,7 +427,7 @@ describe('/v1/models route', () => {
     };
     const ids = body.data.map((item) => item.id);
     expect(ids).toContain('allowed-model');
-    expect(ids).not.toContain('blocked-model');
+    expect(ids).toContain('blocked-model');
   });
 
   it('returns only selected group route alias for managed key with allowedRouteIds policy', async () => {
@@ -354,46 +505,76 @@ describe('/v1/models route', () => {
     expect(ids).not.toContain('claude-sonnet-4-5');
   });
 
-  it('returns no models for managed key with empty model and group selections', async () => {
+  it('returns default explicit groups for managed key with no model selections', async () => {
     const site = await db.insert(schema.sites).values({
-      name: 'deny-all-site',
-      url: 'https://deny-all.example.com',
+      name: 'default-group-site',
+      url: 'https://default-group.example.com',
       platform: 'openai',
       status: 'active',
     }).returning().get();
 
     const account = await db.insert(schema.accounts).values({
       siteId: site.id,
-      accessToken: 'deny-all-access-token',
+      accessToken: 'default-group-access-token',
       status: 'active',
     }).returning().get();
 
-    await db.insert(schema.modelAvailability).values([
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'default-group-api-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const sourceRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'openai/gpt-5.5',
+      enabled: true,
+    }).returning().get();
+    const rawRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'legacy-raw-model',
+      enabled: true,
+    }).returning().get();
+    const groupRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.5',
+      displayName: 'gpt-5.5',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeGroupSources).values({
+      groupRouteId: groupRoute.id,
+      sourceRouteId: sourceRoute.id,
+    }).run();
+
+    await db.insert(schema.routeChannels).values([
       {
+        routeId: sourceRoute.id,
         accountId: account.id,
-        modelName: 'gpt-4o-mini',
-        available: true,
+        tokenId: token.id,
+        sourceModel: 'openai/gpt-5.5',
+        enabled: true,
       },
       {
+        routeId: rawRoute.id,
         accountId: account.id,
-        modelName: 'claude-opus-4-6',
-        available: true,
+        tokenId: token.id,
+        sourceModel: 'legacy-raw-model',
+        enabled: true,
       },
     ]).run();
 
     await db.insert(schema.downstreamApiKeys).values({
-      name: 'managed-key-deny-all',
-      key: 'sk-managed-deny-all',
+      name: 'managed-key-default-groups',
+      key: 'sk-managed-default-groups',
       enabled: true,
-      supportedModels: JSON.stringify([]),
-      allowedRouteIds: JSON.stringify([]),
     }).run();
 
     const response = await app.inject({
       method: 'GET',
       url: '/v1/models',
       headers: {
-        authorization: 'Bearer sk-managed-deny-all',
+        authorization: 'Bearer sk-managed-default-groups',
       },
     });
 
@@ -403,7 +584,10 @@ describe('/v1/models route', () => {
       data: Array<{ id: string }>;
     };
 
-    expect(body.data).toEqual([]);
+    const ids = body.data.map((item) => item.id);
+    expect(ids).toEqual(['gpt-5.5']);
+    expect(ids).not.toContain('openai/gpt-5.5');
+    expect(ids).not.toContain('legacy-raw-model');
   });
 
   it('returns only explicit-group public name while hiding source exact routes', async () => {

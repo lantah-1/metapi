@@ -23,6 +23,7 @@ import { downstreamApiKeysRoutes } from './routes/api/downstreamApiKeys.js';
 import { oauthRoutes } from './routes/api/oauth.js';
 import { siteAnnouncementsRoutes } from './routes/api/siteAnnouncements.js';
 import { updateCenterRoutes } from './routes/api/updateCenter.js';
+import { routeHeaderTemplatesRoutes } from './routes/api/routeHeaderTemplates.js';
 import { proxyRoutes } from './routes/proxy/router.js';
 import { startScheduler } from './services/checkinScheduler.js';
 import * as routeRefreshWorkflow from './services/routeRefreshWorkflow.js';
@@ -36,10 +37,6 @@ import { ensureOauthIdentityBackfill } from './services/oauth/oauthIdentityBackf
 import { ensureOauthProviderSitesExist } from './services/oauth/oauthSiteRegistry.js';
 import { startOAuthLoopbackCallbackServers, stopOAuthLoopbackCallbackServers } from './services/oauth/localCallbackServer.js';
 import { startSiteAnnouncementPolling, stopSiteAnnouncementPolling } from './services/siteAnnouncementPollingService.js';
-import {
-  startModelAvailabilityProbeScheduler,
-  stopModelAvailabilityProbeScheduler,
-} from './services/modelAvailabilityProbeService.js';
 import {
   startChannelRecoveryProbeScheduler,
   stopChannelRecoveryProbeScheduler,
@@ -216,6 +213,7 @@ await app.register(sitesRoutes);
 await app.register(accountsRoutes);
 await app.register(checkinRoutes);
 await app.register(tokensRoutes);
+await app.register(routeHeaderTemplatesRoutes);
 await app.register(statsRoutes);
 await app.register(authRoutes);
 await app.register(settingsRoutes);
@@ -264,7 +262,6 @@ if (existsSync(webDir)) {
 await startScheduler();
 await reloadBackupWebdavScheduler();
 startSiteAnnouncementPolling();
-startModelAvailabilityProbeScheduler();
 startChannelRecoveryProbeScheduler();
 startSub2ApiManagedRefreshScheduler();
 startUpdateCenterPolling();
@@ -282,7 +279,6 @@ app.addHook('onClose', async () => {
   stopUpdateCenterPolling();
   stopProxyFileRetentionService();
   stopProxyLogRetentionService();
-  stopModelAvailabilityProbeScheduler();
   stopChannelRecoveryProbeScheduler();
   await stopUsageAggregationProjectorScheduler();
   await stopAdminSnapshotWarmScheduler();

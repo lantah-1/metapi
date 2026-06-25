@@ -70,7 +70,7 @@ function buildSummaryItem(id: number, overrides?: Partial<any>) {
     usedCost: 0,
     maxRequests: null,
     usedRequests: 0,
-    supportedModels: ['gpt-4.1-mini'],
+    supportedModels: ['默认群组'],
     allowedRouteIds: [11],
     siteWeightMultipliers: {},
     lastUsedAt: '2026-03-15T08:27:25.378Z',
@@ -103,7 +103,7 @@ function buildRawItem(id: number, overrides?: Partial<any>) {
     usedCost: 0,
     maxRequests: null,
     usedRequests: 0,
-    supportedModels: ['gpt-4.1-mini'],
+    supportedModels: ['默认群组'],
     allowedRouteIds: [11],
     siteWeightMultipliers: {},
     lastUsedAt: '2026-03-15T08:27:25.378Z',
@@ -152,7 +152,8 @@ describe('DownstreamKeys mobile layout', () => {
       items: [buildRawItem(1), buildRawItem(2)],
     });
     apiMock.getRoutesLite.mockResolvedValue([
-      { id: 11, modelPattern: 'claude-*', displayName: '默认群组', enabled: true },
+      { id: 11, modelPattern: 'gpt-5.5', displayName: '默认群组', routeMode: 'explicit_group', sourceRouteIds: [12], enabled: true },
+      { id: 12, modelPattern: 'openai/gpt-5.5', displayName: null, routeMode: 'pattern', sourceRouteIds: [], enabled: true },
     ]);
     apiMock.getDownstreamApiKeyOverview.mockResolvedValue({
       success: true,

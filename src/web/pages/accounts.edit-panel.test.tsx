@@ -254,7 +254,7 @@ describe('Accounts edit panel', () => {
       await flushMicrotasks();
 
       const rendered = JSON.stringify(root.toJSON());
-      expect(rendered).toContain('模型管理 · Site B');
+      expect(rendered).toContain('模型列表 · Site B');
       expect(rendered).toContain('model-b');
       expect(rendered).not.toContain('model-a');
     } finally {
@@ -262,7 +262,7 @@ describe('Accounts edit panel', () => {
     }
   });
 
-  it('reports route rebuild failure without claiming success', async () => {
+  it('does not expose disabled model save controls from the account model modal', async () => {
     apiMock.getAccountModels.mockResolvedValue({
       siteId: 1,
       siteName: 'Site A',
@@ -270,8 +270,6 @@ describe('Accounts edit panel', () => {
       totalCount: 1,
       disabledCount: 0,
     });
-    apiMock.rebuildRoutes.mockRejectedValue(new Error('rebuild failed'));
-
     let root!: WebTestRenderer;
     try {
       await act(async () => {
@@ -304,19 +302,13 @@ describe('Accounts edit panel', () => {
         && collectText(node).trim() === '保存'
       ));
 
-      await act(async () => {
-        await saveButtons[saveButtons.length - 1]!.props.onClick();
-      });
-      await flushMicrotasks();
-
-      expect(apiMock.updateSiteDisabledModels).toHaveBeenCalledWith(1, []);
-      expect(apiMock.rebuildRoutes).toHaveBeenCalledWith(false, false);
-      expect(toastMock.error).toHaveBeenCalledWith('模型禁用设置已保存，但路由重建失败，请手动刷新路由');
-      expect(toastMock.success).not.toHaveBeenCalledWith('模型禁用设置已保存，路由已重建');
+      expect(saveButtons).toHaveLength(0);
+      expect(collectText(root.root)).not.toContain('禁用');
+      expect(apiMock.updateSiteDisabledModels).not.toHaveBeenCalled();
+      expect(apiMock.rebuildRoutes).not.toHaveBeenCalled();
     } finally {
       root?.unmount();
     }
   });
 });
-
 

@@ -40,7 +40,7 @@ describe('TokenRouter downstream policy', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('respects allowedRouteIds when selecting channels', async () => {
+  it('ignores legacy allowedRouteIds when selecting channels', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-a',
       url: 'https://a.example.com',
@@ -99,10 +99,11 @@ describe('TokenRouter downstream policy', () => {
 
     expect(allowedPick).toBeTruthy();
     expect(allowedPick?.channel.routeId).toBe(routeAllowed.id);
-    expect(blockedPick).toBeNull();
+    expect(blockedPick).toBeTruthy();
+    expect(blockedPick?.channel.routeId).toBe(routeBlocked.id);
   });
 
-  it('rejects route selection when both supportedModels and allowedRouteIds are empty', async () => {
+  it('keeps legacy deny-all downstream policy unrestricted', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-deny-all',
       url: 'https://deny-all.example.com',
@@ -140,10 +141,11 @@ describe('TokenRouter downstream policy', () => {
       denyAllWhenEmpty: true,
     });
 
-    expect(deniedPick).toBeNull();
+    expect(deniedPick).toBeTruthy();
+    expect(deniedPick?.channel.routeId).toBe(route.id);
   });
 
-  it('applies site weight multipliers to probability explanation', async () => {
+  it('ignores downstream site weight multipliers in probability explanation', async () => {
     const siteHigh = await db.insert(schema.sites).values({
       name: 'high-site',
       url: 'https://high.example.com',
@@ -221,10 +223,10 @@ describe('TokenRouter downstream policy', () => {
 
     expect(highCandidate).toBeTruthy();
     expect(lowCandidate).toBeTruthy();
-    expect((highCandidate?.probability || 0)).toBeGreaterThan(lowCandidate?.probability || 0);
+    expect(highCandidate?.probability).toBeCloseTo(lowCandidate?.probability || 0);
   });
 
-  it('combines site global weight with downstream site multiplier', async () => {
+  it('applies site global weight without downstream site multiplier', async () => {
     const siteGlobalHigh = await db.insert(schema.sites).values({
       name: 'global-high-site',
       url: 'https://global-high.example.com',
@@ -304,7 +306,7 @@ describe('TokenRouter downstream policy', () => {
 
     expect(highCandidate).toBeTruthy();
     expect(lowCandidate).toBeTruthy();
-    // combined multiplier: high=3*0.5=1.5, low=1*1=1
+    // Downstream multipliers are ignored; only site global weight remains.
     expect((highCandidate?.probability || 0)).toBeGreaterThan(lowCandidate?.probability || 0);
   });
 
@@ -366,7 +368,7 @@ describe('TokenRouter downstream policy', () => {
     expect(gptPick?.channel.routeId).toBe(gptExactRoute.id);
   });
 
-  it('excludes candidates from excluded sites before route selection', async () => {
+  it('ignores legacy excluded sites before route selection', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-excluded',
       url: 'https://excluded.example.com',
@@ -409,12 +411,12 @@ describe('TokenRouter downstream policy', () => {
     const decision = await router.explainSelectionForRoute(route.id, 'gpt-4o-mini', [], policy);
     const candidate = decision.candidates.find((item) => item.channelId === channel.id);
 
-    expect(pick).toBeNull();
-    expect(candidate?.eligible).toBe(false);
-    expect(candidate?.reason).toContain('站点已被下游密钥排除');
+    expect(pick).toBeTruthy();
+    expect(candidate?.eligible).toBe(true);
+    expect(candidate?.reason).not.toContain('站点已被下游密钥排除');
   });
 
-  it('excludes explicitly bound tokens by downstream credential refs', async () => {
+  it('ignores legacy explicitly bound token exclusions', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-token',
       url: 'https://token.example.com',
@@ -492,13 +494,13 @@ describe('TokenRouter downstream policy', () => {
     const blockedCandidate = decision.candidates.find((item) => item.channelId === blockedChannel.id);
     const allowedCandidate = decision.candidates.find((item) => item.channelId === allowedChannel.id);
 
-    expect(pick?.channel.id).toBe(allowedChannel.id);
-    expect(blockedCandidate?.eligible).toBe(false);
-    expect(blockedCandidate?.reason).toContain('API Key/令牌已被下游密钥排除');
+    expect(pick).toBeTruthy();
+    expect(blockedCandidate?.eligible).toBe(true);
+    expect(blockedCandidate?.reason).not.toContain('API Key/令牌已被下游密钥排除');
     expect(allowedCandidate?.eligible).toBe(true);
   });
 
-  it('excludes default api key channels by downstream credential refs', async () => {
+  it('ignores legacy default api key channel exclusions', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-default',
       url: 'https://default.example.com',
@@ -558,8 +560,8 @@ describe('TokenRouter downstream policy', () => {
     const decision = await router.explainSelectionForRoute(route.id, 'gpt-5-mini', [], policy);
     const blockedCandidate = decision.candidates.find((item) => item.channelId === blockedChannel.id);
 
-    expect(pick?.channel.id).toBe(allowedChannel.id);
-    expect(blockedCandidate?.eligible).toBe(false);
-    expect(blockedCandidate?.reason).toContain('API Key/令牌已被下游密钥排除');
+    expect(pick).toBeTruthy();
+    expect(blockedCandidate?.eligible).toBe(true);
+    expect(blockedCandidate?.reason).not.toContain('API Key/令牌已被下游密钥排除');
   });
 });

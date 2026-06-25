@@ -31,8 +31,7 @@ vi.mock('../components/Toast.js', () => ({
 }));
 
 function collectText(node: ReactTestInstance): string {
-  const children = node.children || [];
-  return children.map((child) => {
+  return (node.children || []).map((child) => {
     if (typeof child === 'string') return child;
     return collectText(child);
   }).join('');
@@ -45,7 +44,7 @@ async function flushMicrotasks() {
   });
 }
 
-describe('Sites disabled models save', () => {
+describe('Sites disabled models entry removal', () => {
   let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -60,9 +59,6 @@ describe('Sites disabled models save', () => {
         status: 'active',
       },
     ]);
-    apiMock.getSiteDisabledModels.mockResolvedValue({ models: [] });
-    apiMock.getSiteAvailableModels.mockResolvedValue({ models: [] });
-    apiMock.updateSiteDisabledModels.mockResolvedValue({ success: true });
   });
 
   afterEach(() => {
@@ -70,125 +66,39 @@ describe('Sites disabled models save', () => {
     vi.clearAllMocks();
   });
 
-  async function renderSitesEditor(): Promise<WebTestRenderer> {
-    let root!: WebTestRenderer;
-    await act(async () => {
-      root = create(
-        <MemoryRouter initialEntries={['/sites']}>
-          <ToastProvider>
-            <Sites />
-          </ToastProvider>
-        </MemoryRouter>,
-      );
-    });
-    await flushMicrotasks();
-
-    const editButton = root.root.find((node: ReactTestInstance) => (
-      node.type === 'button'
-      && typeof node.props.onClick === 'function'
-      && collectText(node).trim() === '编辑'
-    ));
-
-    await act(async () => {
-      editButton.props.onClick();
-    });
-    await flushMicrotasks();
-
-    return root;
-  }
-
-  it('reports route rebuild failure after saving disabled models from sites editor', async () => {
-    apiMock.rebuildRoutes.mockRejectedValue(new Error('rebuild failed'));
-
+  it('does not render site-level disabled model management in the editor', async () => {
     let root!: WebTestRenderer;
     try {
-      root = await renderSitesEditor();
-
-      const saveButton = root.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node).includes('保存禁用列表')
-      ));
-
       await act(async () => {
-        await saveButton.props.onClick();
+        root = create(
+          <MemoryRouter initialEntries={['/sites']}>
+            <ToastProvider>
+              <Sites />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
       });
       await flushMicrotasks();
 
-      expect(apiMock.updateSiteDisabledModels).toHaveBeenCalledWith(1, []);
-      expect(apiMock.rebuildRoutes).toHaveBeenCalledWith(false, false);
-      expect(toastMock.error).toHaveBeenCalledWith('禁用模型列表已保存，但路由重建失败，请手动刷新路由');
-      expect(toastMock.success).not.toHaveBeenCalledWith('禁用模型列表已保存，路由已重建');
-    } finally {
-      root?.unmount();
-    }
-  });
-
-  it('preserves existing disabled models when available-model loading fails', async () => {
-    apiMock.getSiteDisabledModels.mockResolvedValue({ models: ['gpt-4o'] });
-    apiMock.getSiteAvailableModels.mockRejectedValue(new Error('available models failed'));
-    apiMock.rebuildRoutes.mockResolvedValue({ success: true });
-
-    let root!: WebTestRenderer;
-    try {
-      root = await renderSitesEditor();
-
-      const saveButton = root.root.find((node: ReactTestInstance) => (
+      const editButton = root.root.find((node: ReactTestInstance) => (
         node.type === 'button'
         && typeof node.props.onClick === 'function'
-        && collectText(node).includes('保存禁用列表')
+        && collectText(node).trim() === '编辑'
       ));
 
       await act(async () => {
-        await saveButton.props.onClick();
+        editButton.props.onClick();
       });
       await flushMicrotasks();
 
-      expect(apiMock.updateSiteDisabledModels).toHaveBeenCalledWith(1, ['gpt-4o']);
-    } finally {
-      root?.unmount();
-    }
-  });
-
-  it('allows adding a disabled model manually when no available models are discovered', async () => {
-    apiMock.rebuildRoutes.mockResolvedValue({ success: true });
-
-    let root!: WebTestRenderer;
-    try {
-      root = await renderSitesEditor();
-
-      const manualInput = root.root.find((node: ReactTestInstance) => (
-        node.type === 'input'
-        && node.props.placeholder === '输入模型名称，如 gpt-4o'
-      ));
-
-      await act(async () => {
-        manualInput.props.onChange({ target: { value: 'gpt-4o' } });
-      });
-
-      const addButton = root.root.find((node: ReactTestInstance) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node).trim() === '添加模型'
-      ));
-
-      await act(async () => {
-        addButton.props.onClick();
-      });
-      await flushMicrotasks();
-
-      const saveButton = root.root.find((node: ReactTestInstance) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node).includes('保存禁用列表')
-      ));
-
-      await act(async () => {
-        await saveButton.props.onClick();
-      });
-      await flushMicrotasks();
-
-      expect(apiMock.updateSiteDisabledModels).toHaveBeenCalledWith(1, ['gpt-4o']);
+      const text = collectText(root.root);
+      expect(text).not.toContain('禁用模型管理');
+      expect(text).not.toContain('保存禁用列表');
+      expect(text).not.toContain('输入模型名称，如 gpt-4o');
+      expect(apiMock.getSiteDisabledModels).not.toHaveBeenCalled();
+      expect(apiMock.getSiteAvailableModels).not.toHaveBeenCalled();
+      expect(apiMock.updateSiteDisabledModels).not.toHaveBeenCalled();
+      expect(apiMock.rebuildRoutes).not.toHaveBeenCalled();
     } finally {
       root?.unmount();
     }

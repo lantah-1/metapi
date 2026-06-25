@@ -5,7 +5,6 @@ import { config, normalizeTokenRouterFailureCooldownMaxSec } from '../../config.
 import { db, runtimeDbDialect, schema } from '../../db/index.js';
 import { upsertSetting } from '../../db/upsertSetting.js';
 import * as routeRefreshWorkflow from '../../services/routeRefreshWorkflow.js';
-import { getAllBrandNames } from '../../services/brandMatcher.js';
 import { updateBalanceRefreshCron, updateCheckinSchedule, updateLogCleanupSettings } from '../../services/checkinScheduler.js';
 import { sendNotification } from '../../services/notifyService.js';
 import {
@@ -40,11 +39,9 @@ import { invalidateSiteProxyCache, normalizeSiteProxyUrl, withExplicitProxyReque
 import { performFactoryReset } from '../../services/factoryResetService.js';
 import { normalizeLogCleanupRetentionDays } from '../../shared/logCleanupRetentionDays.js';
 import { stopProxyLogRetentionService } from '../../services/proxyLogRetentionService.js';
-import {
-  startModelAvailabilityProbeScheduler,
-  stopModelAvailabilityProbeScheduler,
-} from '../../services/modelAvailabilityProbeService.js';
+import { stopModelAvailabilityProbeScheduler } from '../../services/modelAvailabilityProbeService.js';
 import { parsePayloadRulesConfigInput } from '../../services/payloadRules.js';
+import { clearProxyLogRecords } from '../../services/proxyLogStore.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -414,13 +411,9 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       return;
     }
     case 'model_availability_probe_enabled': {
-      if (typeof value !== 'boolean') return;
-      config.modelAvailabilityProbeEnabled = value;
-      if (value) {
-        startModelAvailabilityProbeScheduler();
-      } else {
-        stopModelAvailabilityProbeScheduler();
-      }
+      void value;
+      config.modelAvailabilityProbeEnabled = false;
+      stopModelAvailabilityProbeScheduler();
       return;
     }
     case 'codex_upstream_websocket_enabled': {
@@ -523,49 +516,13 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       return;
     }
     case 'global_blocked_brands': {
-      try {
-        const parsed = typeof value === 'string' ? JSON.parse(value) : value;
-        if (Array.isArray(parsed)) {
-          const nextBrands = parsed.filter((b): b is string => typeof b === 'string').map((b) => b.trim()).filter(Boolean);
-          const prev = JSON.stringify(config.globalBlockedBrands);
-          config.globalBlockedBrands = nextBrands;
-          if (prev !== JSON.stringify(nextBrands)) {
-            startBackgroundTask(
-              {
-                type: 'maintenance',
-                title: '品牌屏蔽变更后重建路由',
-                dedupeKey: 'refresh-models-and-rebuild-routes',
-              },
-              async () => routeRefreshWorkflow.refreshModelsAndRebuildRoutes(),
-            );
-          }
-        }
-      } catch {
-        return;
-      }
+      void value;
+      config.globalBlockedBrands = [];
       return;
     }
     case 'global_allowed_models': {
-      try {
-        const parsed = typeof value === 'string' ? JSON.parse(value) : value;
-        if (Array.isArray(parsed)) {
-          const nextModels = parsed.filter((m): m is string => typeof m === 'string').map((m) => m.trim()).filter(Boolean);
-          const prev = JSON.stringify(config.globalAllowedModels);
-          config.globalAllowedModels = nextModels;
-          if (prev !== JSON.stringify(nextModels)) {
-            startBackgroundTask(
-              {
-                type: 'maintenance',
-                title: '模型白名单变更后重建路由',
-                dedupeKey: 'refresh-models-and-rebuild-routes',
-              },
-              async () => routeRefreshWorkflow.refreshModelsAndRebuildRoutes(),
-            );
-          }
-        }
-      } catch {
-        return;
-      }
+      void value;
+      config.globalAllowedModels = [];
       return;
     }
     case 'webhook_url': {
@@ -721,7 +678,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     logCleanupUsageLogsEnabled: config.logCleanupUsageLogsEnabled,
     logCleanupProgramLogsEnabled: config.logCleanupProgramLogsEnabled,
     logCleanupRetentionDays: config.logCleanupRetentionDays,
-    modelAvailabilityProbeEnabled: config.modelAvailabilityProbeEnabled,
+    modelAvailabilityProbeEnabled: false,
     codexUpstreamWebsocketEnabled: config.codexUpstreamWebsocketEnabled,
     responsesCompactFallbackToResponsesEnabled: config.responsesCompactFallbackToResponsesEnabled,
     disableCrossProtocolFallback: config.disableCrossProtocolFallback,
@@ -769,8 +726,8 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     proxyErrorKeywords: config.proxyErrorKeywords,
     proxyEmptyContentFailEnabled: config.proxyEmptyContentFailEnabled,
     proxyTokenMasked: maskSecret(config.proxyToken),
-    globalBlockedBrands: config.globalBlockedBrands,
-    globalAllowedModels: config.globalAllowedModels,
+    globalBlockedBrands: [],
+    globalAllowedModels: [],
   };
 }
 
@@ -846,10 +803,6 @@ export async function settingsRoutes(app: FastifyInstance) {
   await app.get('/api/settings/runtime', async (request) => {
     const currentAdminIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
     return getRuntimeSettingsResponse(currentAdminIp);
-  });
-
-  app.get('/api/settings/brand-list', async () => {
-    return { brands: getAllBrandNames() };
   });
 
   app.post<{ Body: unknown }>('/api/settings/system-proxy/test', async (request, reply) => {
@@ -1158,26 +1111,12 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
 
     if (body.modelAvailabilityProbeEnabled !== undefined) {
-      let nextValue = false;
-      try {
-        nextValue = parseBooleanFlag(body.modelAvailabilityProbeEnabled, '批量测活开关');
-      } catch (err: any) {
-        return reply.code(400).send({
-          success: false,
-          message: err?.message || '批量测活开关格式无效',
-        });
+      if (config.modelAvailabilityProbeEnabled) {
+        changedLabels.push('清理旧模型可用性探测配置');
       }
-
-      if (nextValue !== config.modelAvailabilityProbeEnabled) {
-        changedLabels.push(nextValue ? '开启批量测活' : '关闭批量测活');
-      }
-      await upsertSetting('model_availability_probe_enabled', nextValue);
-      config.modelAvailabilityProbeEnabled = nextValue;
-      if (nextValue) {
-        startModelAvailabilityProbeScheduler();
-      } else {
-        stopModelAvailabilityProbeScheduler();
-      }
+      await upsertSetting('model_availability_probe_enabled', false);
+      config.modelAvailabilityProbeEnabled = false;
+      stopModelAvailabilityProbeScheduler();
     }
 
     if (body.codexUpstreamWebsocketEnabled !== undefined) {
@@ -1418,53 +1357,19 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
 
     if (body.globalBlockedBrands !== undefined) {
-      if (!Array.isArray(body.globalBlockedBrands)) {
-        return reply.code(400).send({ error: 'globalBlockedBrands must be an array of strings' });
+      if (config.globalBlockedBrands.length > 0) {
+        changedLabels.push('清理旧全局品牌过滤配置');
       }
-      const nextBrands = body.globalBlockedBrands.filter((b): b is string => typeof b === 'string').map((b) => b.trim()).filter(Boolean);
-      const uniqueBrands = Array.from(new Set(nextBrands));
-      const prev = JSON.stringify(config.globalBlockedBrands);
-      const next = JSON.stringify(uniqueBrands);
-      if (prev !== next) {
-        changedLabels.push('全局品牌屏蔽');
-      }
-      config.globalBlockedBrands = uniqueBrands;
-      upsertSetting('global_blocked_brands', uniqueBrands);
-      if (prev !== next) {
-        startBackgroundTask(
-          {
-            type: 'maintenance',
-            title: '品牌屏蔽变更后重建路由',
-            dedupeKey: 'refresh-models-and-rebuild-routes',
-          },
-          async () => routeRefreshWorkflow.refreshModelsAndRebuildRoutes(),
-        );
-      }
+      config.globalBlockedBrands = [];
+      upsertSetting('global_blocked_brands', []);
     }
 
     if (body.globalAllowedModels !== undefined) {
-      if (!Array.isArray(body.globalAllowedModels)) {
-        return reply.code(400).send({ error: 'globalAllowedModels must be an array of strings' });
+      if (config.globalAllowedModels.length > 0) {
+        changedLabels.push('清理旧全局模型过滤配置');
       }
-      const nextModels = body.globalAllowedModels.filter((m): m is string => typeof m === 'string').map((m) => m.trim()).filter(Boolean);
-      const uniqueModels = Array.from(new Set(nextModels));
-      const prev = JSON.stringify(config.globalAllowedModels);
-      const next = JSON.stringify(uniqueModels);
-      if (prev !== next) {
-        changedLabels.push('全局模型白名单');
-      }
-      config.globalAllowedModels = uniqueModels;
-      upsertSetting('global_allowed_models', uniqueModels);
-      if (prev !== next) {
-        startBackgroundTask(
-          {
-            type: 'maintenance',
-            title: '模型白名单变更后重建路由',
-            dedupeKey: 'refresh-models-and-rebuild-routes',
-          },
-          async () => routeRefreshWorkflow.refreshModelsAndRebuildRoutes(),
-        );
-      }
+      config.globalAllowedModels = [];
+      upsertSetting('global_allowed_models', []);
     }
 
     if (body.webhookUrl !== undefined) {
@@ -2018,7 +1923,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/settings/maintenance/clear-usage', async () => {
-    const deletedProxyLogs = (await db.delete(schema.proxyLogs).run()).changes;
+    const deletedProxyLogs = await clearProxyLogRecords();
 
     await db.update(schema.routeChannels).set({
       successCount: 0,

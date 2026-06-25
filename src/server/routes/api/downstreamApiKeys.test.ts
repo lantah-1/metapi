@@ -94,8 +94,8 @@ describe('downstream api keys routes', () => {
       tags: ['移动端', 'VIP'],
       maxCost: 12.5,
       maxRequests: 500,
-      supportedModels: ['gpt-5.2', 'claude-sonnet-4-5'],
-      allowedRouteIds: [route.id],
+      supportedModels: [],
+      allowedRouteIds: [],
     });
 
     const keyId = createdBody.item.id as number;
@@ -224,7 +224,7 @@ describe('downstream api keys routes', () => {
     });
   });
 
-  it('roundtrips excluded sites and excluded credentials through create, update, and list', async () => {
+  it('accepts legacy exclusion payloads but stores them as empty policy', async () => {
     const siteA = await db.insert(schema.sites).values({
       name: 'site-a',
       url: 'https://site-a.example.com',
@@ -287,11 +287,8 @@ describe('downstream api keys routes', () => {
     expect(createRes.json()).toMatchObject({
       success: true,
       item: {
-        excludedSiteIds: [siteB.id],
-        excludedCredentialRefs: [
-          { kind: 'account_token', siteId: siteA.id, accountId: accountA.id, tokenId: tokenA.id },
-          { kind: 'default_api_key', siteId: siteB.id, accountId: accountB.id },
-        ],
+        excludedSiteIds: [],
+        excludedCredentialRefs: [],
       },
     });
 
@@ -313,11 +310,8 @@ describe('downstream api keys routes', () => {
     expect(updateRes.json()).toMatchObject({
       success: true,
       item: {
-        excludedSiteIds: [siteA.id, siteB.id],
-        excludedCredentialRefs: [
-          { kind: 'account_token', siteId: siteA.id, accountId: accountA.id, tokenId: tokenA.id },
-          { kind: 'default_api_key', siteId: siteB.id, accountId: accountB.id },
-        ],
+        excludedSiteIds: [],
+        excludedCredentialRefs: [],
       },
     });
 
@@ -332,17 +326,14 @@ describe('downstream api keys routes', () => {
       items: [
         expect.objectContaining({
           id: keyId,
-          excludedSiteIds: [siteA.id, siteB.id],
-          excludedCredentialRefs: [
-            { kind: 'account_token', siteId: siteA.id, accountId: accountA.id, tokenId: tokenA.id },
-            { kind: 'default_api_key', siteId: siteB.id, accountId: accountB.id },
-          ],
+          excludedSiteIds: [],
+          excludedCredentialRefs: [],
         }),
       ],
     });
   });
 
-  it('rejects unknown or mismatched exclusion references', async () => {
+  it('does not validate legacy exclusion references', async () => {
     const siteA = await db.insert(schema.sites).values({
       name: 'site-a',
       url: 'https://site-a.example.com',
@@ -387,7 +378,14 @@ describe('downstream api keys routes', () => {
         excludedSiteIds: [999999],
       },
     });
-    expect(unknownSiteRes.statusCode).toBe(400);
+    expect(unknownSiteRes.statusCode).toBe(200);
+    expect(unknownSiteRes.json()).toMatchObject({
+      success: true,
+      item: {
+        excludedSiteIds: [],
+        excludedCredentialRefs: [],
+      },
+    });
 
     const mismatchedTokenRes = await app.inject({
       method: 'POST',
@@ -400,7 +398,14 @@ describe('downstream api keys routes', () => {
         ],
       },
     });
-    expect(mismatchedTokenRes.statusCode).toBe(400);
+    expect(mismatchedTokenRes.statusCode).toBe(200);
+    expect(mismatchedTokenRes.json()).toMatchObject({
+      success: true,
+      item: {
+        excludedSiteIds: [],
+        excludedCredentialRefs: [],
+      },
+    });
 
     const missingDefaultApiKeyRes = await app.inject({
       method: 'POST',
@@ -413,7 +418,14 @@ describe('downstream api keys routes', () => {
         ],
       },
     });
-    expect(missingDefaultApiKeyRes.statusCode).toBe(400);
+    expect(missingDefaultApiKeyRes.statusCode).toBe(200);
+    expect(missingDefaultApiKeyRes.json()).toMatchObject({
+      success: true,
+      item: {
+        excludedSiteIds: [],
+        excludedCredentialRefs: [],
+      },
+    });
   });
 
   it('supports batch enable/disable/reset/delete operations', async () => {
@@ -852,7 +864,7 @@ describe('downstream api keys routes', () => {
     });
   });
 
-  it('rejects unknown route ids and site ids in downstream policy payloads', async () => {
+  it('does not validate legacy route ids and site ids in downstream policy payloads', async () => {
     const createRes = await app.inject({
       method: 'POST',
       url: '/api/downstream-keys',
@@ -862,10 +874,12 @@ describe('downstream api keys routes', () => {
         allowedRouteIds: [999],
       },
     });
-    expect(createRes.statusCode).toBe(400);
+    expect(createRes.statusCode).toBe(200);
     expect(createRes.json()).toMatchObject({
-      success: false,
-      message: 'allowedRouteIds 包含不存在的路由: 999',
+      success: true,
+      item: {
+        allowedRouteIds: [],
+      },
     });
 
     const site = await db.insert(schema.sites).values({
@@ -889,6 +903,10 @@ describe('downstream api keys routes', () => {
       },
     });
     expect(created.statusCode).toBe(200);
+    expect(created.json().item).toMatchObject({
+      allowedRouteIds: [],
+      siteWeightMultipliers: {},
+    });
     const keyId = created.json().item.id as number;
 
     const updateRes = await app.inject({
@@ -898,10 +916,12 @@ describe('downstream api keys routes', () => {
         siteWeightMultipliers: { 999: 1.5 },
       },
     });
-    expect(updateRes.statusCode).toBe(400);
+    expect(updateRes.statusCode).toBe(200);
     expect(updateRes.json()).toMatchObject({
-      success: false,
-      message: '策略中包含不存在的站点: 999',
+      success: true,
+      item: {
+        siteWeightMultipliers: {},
+      },
     });
 
     const filteredSummaryRes = await app.inject({

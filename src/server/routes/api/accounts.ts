@@ -1766,8 +1766,6 @@ export async function accountsRoutes(app: FastifyInstance) {
         return reply.code(404).send({ message: "账号不存在" });
       }
 
-      const siteId = account.accounts.siteId;
-
       // Get available models for this account
       const modelRows = await db
         .select({
@@ -1780,33 +1778,20 @@ export async function accountsRoutes(app: FastifyInstance) {
         .where(eq(schema.modelAvailability.accountId, accountId))
         .all();
 
-      // Get disabled models for this site
-      const disabledRows = await db
-        .select({
-          modelName: schema.siteDisabledModels.modelName,
-        })
-        .from(schema.siteDisabledModels)
-        .where(eq(schema.siteDisabledModels.siteId, siteId))
-        .all();
-
-      const disabledSet = new Set(disabledRows.map((r) => r.modelName));
-
       const models = modelRows
         .filter((r) => r.available)
         .map((r) => ({
           name: r.modelName,
           latencyMs: r.latencyMs,
-          disabled: disabledSet.has(r.modelName),
           isManual: !!r.isManual,
         }))
         .sort((a, b) => a.name.localeCompare(b.name));
 
       return {
-        siteId,
+        siteId: account.accounts.siteId,
         siteName: account.sites.name,
         models,
         totalCount: models.length,
-        disabledCount: models.filter((m) => m.disabled).length,
       };
     },
   );

@@ -1,8 +1,3 @@
-export type SiteCustomHeaderField = {
-  key: string;
-  value: string;
-};
-
 export type SiteApiEndpointField = {
   draftId?: string;
   url: string;
@@ -19,7 +14,6 @@ export type SiteForm = {
   proxyUrl: string;
   useSystemProxy: boolean;
   apiEndpoints: SiteApiEndpointField[];
-  customHeaders: SiteCustomHeaderField[];
   globalWeight: string;
 };
 
@@ -40,21 +34,12 @@ export type SiteSavePayload = {
     enabled: boolean;
     sortOrder: number;
   }>;
-  customHeaders: string;
   globalWeight: number;
-  postRefreshProbeEnabled?: boolean;
-  postRefreshProbeModel?: string;
-  postRefreshProbeScope?: 'single' | 'all';
-  postRefreshProbeLatencyThresholdMs?: number;
 };
 
 type SiteSaveAction =
   | { kind: 'add'; payload: SiteSavePayload }
   | { kind: 'update'; id: number; payload: SiteSavePayload };
-
-export function emptySiteCustomHeader(): SiteCustomHeaderField {
-  return { key: '', value: '' };
-}
 
 export function emptySiteApiEndpoint(): SiteApiEndpointField {
   return {
@@ -63,10 +48,6 @@ export function emptySiteApiEndpoint(): SiteApiEndpointField {
     cooldownUntil: null,
     lastFailureReason: null,
   };
-}
-
-function ensureSiteCustomHeaderRows(rows: SiteCustomHeaderField[]): SiteCustomHeaderField[] {
-  return rows.length > 0 ? rows : [emptySiteCustomHeader()];
 }
 
 export function emptySiteForm(): SiteForm {
@@ -78,38 +59,12 @@ export function emptySiteForm(): SiteForm {
     proxyUrl: '',
     useSystemProxy: false,
     apiEndpoints: [emptySiteApiEndpoint()],
-    customHeaders: [emptySiteCustomHeader()],
     globalWeight: '1',
   };
 }
 
 function ensureSiteApiEndpointRows(rows: SiteApiEndpointField[]): SiteApiEndpointField[] {
   return rows.length > 0 ? rows : [emptySiteApiEndpoint()];
-}
-
-function parseCustomHeadersForEditor(raw: unknown): SiteCustomHeaderField[] {
-  if (typeof raw !== 'string') {
-    return ensureSiteCustomHeaderRows([]);
-  }
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return ensureSiteCustomHeaderRows([]);
-  }
-
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return ensureSiteCustomHeaderRows([]);
-    }
-    return ensureSiteCustomHeaderRows(
-      Object.entries(parsed as Record<string, unknown>).map(([key, value]) => ({
-        key,
-        value: typeof value === 'string' ? value : String(value ?? ''),
-      })),
-    );
-  } catch {
-    return ensureSiteCustomHeaderRows([]);
-  }
 }
 
 function parseApiEndpointsForEditor(raw: unknown): SiteApiEndpointField[] {
@@ -131,7 +86,7 @@ function parseApiEndpointsForEditor(raw: unknown): SiteApiEndpointField[] {
   return ensureSiteApiEndpointRows(rows);
 }
 
-export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | 'customHeaders' | 'globalWeight' | 'externalCheckinUrl' | 'proxyUrl' | 'useSystemProxy'>> & {
+export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | 'globalWeight' | 'externalCheckinUrl' | 'proxyUrl' | 'useSystemProxy'>> & {
   externalCheckinUrl?: string | null;
   proxyUrl?: string | null;
   useSystemProxy?: boolean | null;
@@ -141,7 +96,6 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | '
     cooldownUntil?: string | null;
     lastFailureReason?: string | null;
   }> | null;
-  customHeaders?: string | null;
   globalWeight?: number | string | null;
 }): SiteForm {
   const globalWeightRaw = Number(site.globalWeight);
@@ -154,7 +108,6 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | '
     proxyUrl: site.proxyUrl ?? '',
     useSystemProxy: !!site.useSystemProxy,
     apiEndpoints: parseApiEndpointsForEditor(site.apiEndpoints),
-    customHeaders: parseCustomHeadersForEditor(site.customHeaders),
     globalWeight,
   };
 }
@@ -172,36 +125,6 @@ function normalizeSiteApiEndpointUrl(raw: string): string {
   } catch {
     return trimmed.replace(/\/+$/, '');
   }
-}
-
-export function serializeSiteCustomHeaders(fields: SiteCustomHeaderField[]): {
-  valid: boolean;
-  customHeaders: string;
-  error?: string;
-} {
-  const headers: Record<string, string> = {};
-  const seen = new Set<string>();
-
-  for (const field of fields) {
-    const key = field.key.trim();
-    const value = field.value;
-    const hasAnyInput = key.length > 0 || value.trim().length > 0;
-    if (!hasAnyInput) continue;
-    if (!key) {
-      return { valid: false, customHeaders: '', error: '请求头名称不能为空' };
-    }
-    const normalizedKey = key.toLowerCase();
-    if (seen.has(normalizedKey)) {
-      return { valid: false, customHeaders: '', error: `请求头 "${key}" 重复了` };
-    }
-    seen.add(normalizedKey);
-    headers[key] = value;
-  }
-
-  return {
-    valid: true,
-    customHeaders: Object.keys(headers).length > 0 ? JSON.stringify(headers) : '',
-  };
 }
 
 export function serializeSiteApiEndpoints(fields: SiteApiEndpointField[]): {

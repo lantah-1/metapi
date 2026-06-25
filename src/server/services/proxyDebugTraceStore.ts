@@ -159,6 +159,22 @@ export async function deleteExpiredProxyDebugTraces(retentionHours = config.prox
   return Number(result.changes || 0);
 }
 
+export async function clearProxyDebugTraceRecords(): Promise<{
+  deletedDebugAttempts: number;
+  deletedDebugTraces: number;
+}> {
+  const deletedDebugAttempts = Number(
+    (await db.delete(schema.proxyDebugAttempts).run()).changes || 0,
+  );
+  const deletedDebugTraces = Number(
+    (await db.delete(schema.proxyDebugTraces).run()).changes || 0,
+  );
+  return {
+    deletedDebugAttempts,
+    deletedDebugTraces,
+  };
+}
+
 async function pruneProxyDebugTracesIfNeeded(nowMs = Date.now(), retentionHours = config.proxyDebugRetentionHours): Promise<void> {
   if (nowMs - lastPruneAtMs < PRUNE_INTERVAL_MS) return;
   lastPruneAtMs = nowMs;

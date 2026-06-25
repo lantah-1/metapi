@@ -88,7 +88,7 @@ function formatSettingsPayloadError(error: z.ZodError): string {
     return 'Webhook 开关格式无效：需要 boolean';
   }
   if (firstPath === 'modelAvailabilityProbeEnabled') {
-    return '批量测活开关格式无效：需要 boolean';
+    return '旧模型可用性探测开关格式无效：需要 boolean';
   }
   if (firstPath === 'barkEnabled') {
     return 'Bark 开关格式无效：需要 boolean';

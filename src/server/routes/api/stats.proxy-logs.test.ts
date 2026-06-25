@@ -28,7 +28,11 @@ describe("stats proxy logs routes", () => {
   });
 
   beforeEach(async () => {
+    await db.delete(schema.proxyDebugAttempts).run();
+    await db.delete(schema.proxyDebugTraces).run();
     await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.modelDayUsage).run();
+    await db.delete(schema.siteDayUsage).run();
     await db.delete(schema.downstreamApiKeys).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
@@ -301,6 +305,134 @@ describe("stats proxy logs routes", () => {
       breakdown: { totalCost: 0.12 },
       usage: { promptTokens: 100, completionTokens: 20 },
     });
+  });
+
+  it("clears proxy log records without clearing aggregated usage totals", async () => {
+    const site = await db
+      .insert(schema.sites)
+      .values({
+        name: "usage-total-site",
+        url: "https://usage-total.example.com",
+        platform: "new-api",
+      })
+      .returning()
+      .get();
+
+    const account = await db
+      .insert(schema.accounts)
+      .values({
+        siteId: site.id,
+        username: "usage-total-user",
+        accessToken: "usage-total-token",
+        status: "active",
+      })
+      .returning()
+      .get();
+
+    await db
+      .insert(schema.proxyLogs)
+      .values([
+        {
+          accountId: account.id,
+          modelRequested: "gpt-4o",
+          modelActual: "gpt-4o",
+          status: "success",
+          totalTokens: 100,
+          estimatedCost: 0.25,
+          createdAt: formatUtcSqlDateTime(new Date("2026-03-09T08:00:00.000Z")),
+        },
+        {
+          accountId: account.id,
+          modelRequested: "gpt-4o-mini",
+          modelActual: "gpt-4o-mini",
+          status: "failed",
+          totalTokens: 20,
+          estimatedCost: 0.05,
+          createdAt: formatUtcSqlDateTime(new Date("2026-03-09T08:01:00.000Z")),
+        },
+      ])
+      .run();
+
+    await db.insert(schema.siteDayUsage).values({
+      localDay: "2026-03-09",
+      siteId: site.id,
+      totalCalls: 2,
+      successCalls: 1,
+      failedCalls: 1,
+      totalTokens: 120,
+      totalSummarySpend: 0.3,
+      totalSiteSpend: 0.3,
+    }).run();
+    await db.insert(schema.modelDayUsage).values({
+      localDay: "2026-03-09",
+      siteId: site.id,
+      model: "gpt-4o",
+      totalCalls: 1,
+      successCalls: 1,
+      failedCalls: 0,
+      totalTokens: 100,
+      totalSpend: 0.25,
+    }).run();
+    const insertedTrace = await db.insert(schema.proxyDebugTraces).values({
+      downstreamPath: "/v1/responses",
+      clientKind: "codex",
+      sessionId: "debug-session-1",
+      requestedModel: "gpt-4o",
+      finalStatus: "failed",
+      createdAt: formatUtcSqlDateTime(new Date("2026-03-09T08:02:00.000Z")),
+      updatedAt: formatUtcSqlDateTime(new Date("2026-03-09T08:02:01.000Z")),
+    }).run();
+    await db.insert(schema.proxyDebugAttempts).values({
+      traceId: Number(insertedTrace.lastInsertRowid),
+      attemptIndex: 0,
+      endpoint: "default",
+      requestPath: "/v1/responses",
+      targetUrl: "https://usage-total.example.com/v1/responses",
+      responseStatus: 500,
+      createdAt: formatUtcSqlDateTime(new Date("2026-03-09T08:02:02.000Z")),
+    }).run();
+
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/api/stats/proxy-logs",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      deletedProxyLogs: 2,
+      deletedDebugTraces: 1,
+      deletedDebugAttempts: 1,
+    });
+
+    expect(await db.select().from(schema.proxyLogs).all()).toHaveLength(0);
+    expect(await db.select().from(schema.proxyDebugTraces).all()).toHaveLength(0);
+    expect(await db.select().from(schema.proxyDebugAttempts).all()).toHaveLength(0);
+
+    const siteUsageRows = await db.select().from(schema.siteDayUsage).all();
+    expect(siteUsageRows).toHaveLength(1);
+    expect(siteUsageRows[0]).toEqual(
+      expect.objectContaining({
+        localDay: "2026-03-09",
+        siteId: site.id,
+        totalCalls: 2,
+        totalTokens: 120,
+      }),
+    );
+    expect(siteUsageRows[0]?.totalSiteSpend).toBeCloseTo(0.3, 6);
+
+    const modelUsageRows = await db.select().from(schema.modelDayUsage).all();
+    expect(modelUsageRows).toHaveLength(1);
+    expect(modelUsageRows[0]).toEqual(
+      expect.objectContaining({
+        localDay: "2026-03-09",
+        siteId: site.id,
+        model: "gpt-4o",
+        totalCalls: 1,
+        totalTokens: 100,
+      }),
+    );
+    expect(modelUsageRows[0]?.totalSpend).toBeCloseTo(0.25, 6);
   });
 
   it("supports searching proxy logs by downstream key metadata", async () => {

@@ -153,6 +153,46 @@ describe('PUT /api/routes/:id route rebuild', () => {
     expect(rebuiltAuto?.weight).toBe(10);
   });
 
+  it('keeps automatic channels for disabled sites when rebuilding routes', async () => {
+    const disabledCandidate = await seedAccountWithToken('gpt-5.5');
+    await db.update(schema.sites)
+      .set({ status: 'disabled' })
+      .where(eq(schema.sites.id, disabledCandidate.site.id))
+      .run();
+    await db.update(schema.accounts)
+      .set({ status: 'disabled' })
+      .where(eq(schema.accounts.id, disabledCandidate.account.id))
+      .run();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'old-model',
+      displayName: 'old-route',
+      enabled: true,
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'PUT',
+      url: `/api/routes/${route.id}`,
+      payload: {
+        modelPattern: 'gpt-*',
+        displayName: 'gpt-route',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const routeChannels = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, route.id))
+      .all();
+
+    expect(routeChannels).toContainEqual(expect.objectContaining({
+      accountId: disabledCandidate.account.id,
+      tokenId: disabledCandidate.token.id,
+      sourceModel: 'gpt-5.5',
+      manualOverride: false,
+    }));
+  });
+
   it('rate limits repeated route overview reads', async () => {
     resetTokenRouteReadLimitersForTests({
       summaryPoints: 1,
@@ -274,6 +314,135 @@ describe('PUT /api/routes/:id route rebuild', () => {
         sourceModel: 'claude-sonnet-4-5',
       }),
     ]));
+  });
+
+  it('keeps disabled site suppliers in explicit-group details while excluding them from available count', async () => {
+    const activeSource = await seedAccountWithToken('gpt-5.5-openai');
+    const disabledSource = await seedAccountWithToken('gpt-5.5-azure');
+    await db.update(schema.sites)
+      .set({ status: 'disabled' })
+      .where(eq(schema.sites.id, disabledSource.site.id))
+      .run();
+    await db.update(schema.accounts)
+      .set({ status: 'disabled' })
+      .where(eq(schema.accounts.id, disabledSource.account.id))
+      .run();
+
+    const activeRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.5-openai',
+      enabled: true,
+    }).returning().get();
+    const disabledRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.5-azure',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values([
+      {
+        routeId: activeRoute.id,
+        accountId: activeSource.account.id,
+        tokenId: activeSource.token.id,
+        sourceModel: 'gpt-5.5-openai',
+        priority: 0,
+        weight: 10,
+        enabled: true,
+        manualOverride: false,
+      },
+      {
+        routeId: disabledRoute.id,
+        accountId: disabledSource.account.id,
+        tokenId: disabledSource.token.id,
+        sourceModel: 'gpt-5.5-azure',
+        priority: 1,
+        weight: 10,
+        enabled: true,
+        manualOverride: false,
+      },
+    ]).run();
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        routeMode: 'explicit_group',
+        displayName: 'gpt-5.5',
+        sourceRouteIds: [activeRoute.id, disabledRoute.id],
+        routingStrategy: 'stable_first',
+      },
+    });
+    expect(createResponse.statusCode).toBe(200);
+    const createdRouteId = (createResponse.json() as { id: number }).id;
+
+    const summaryResponse = await app.inject({
+      method: 'GET',
+      url: '/api/routes/summary',
+    });
+    expect(summaryResponse.statusCode).toBe(200);
+    expect(summaryResponse.json()).toContainEqual(expect.objectContaining({
+      id: createdRouteId,
+      channelCount: 2,
+      enabledChannelCount: 1,
+      siteNames: expect.arrayContaining([activeSource.site.name, disabledSource.site.name]),
+      siteStatuses: expect.arrayContaining([
+        expect.objectContaining({ id: activeSource.site.id, name: activeSource.site.name, status: 'active' }),
+        expect.objectContaining({ id: disabledSource.site.id, name: disabledSource.site.name, status: 'disabled' }),
+      ]),
+    }));
+
+    const channelsResponse = await app.inject({
+      method: 'GET',
+      url: `/api/routes/${createdRouteId}/channels`,
+    });
+    expect(channelsResponse.statusCode).toBe(200);
+    expect(channelsResponse.json()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        routeId: disabledRoute.id,
+        accountId: disabledSource.account.id,
+        site: expect.objectContaining({ id: disabledSource.site.id, status: 'disabled' }),
+      }),
+    ]));
+  });
+
+  it('creates explicit-group routes by automatically matching source models', async () => {
+    const exactRouteA = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'openai/gpt-5.5',
+      enabled: true,
+    }).returning().get();
+    const exactRouteB = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'azure/gpt-5.5',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-sonnet-4-5',
+      enabled: true,
+    }).returning().get();
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        routeMode: 'explicit_group',
+        displayName: 'gpt-5.5',
+        autoSourceQuery: 'gpt-5.5',
+        routingStrategy: 'stable_first',
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(200);
+    const created = createResponse.json() as {
+      displayName: string;
+      routeMode: string;
+      routingStrategy: string;
+      sourceRouteIds: number[];
+    };
+    expect(created).toMatchObject({
+      displayName: 'gpt-5.5',
+      routeMode: 'explicit_group',
+      routingStrategy: 'stable_first',
+    });
+    expect([...created.sourceRouteIds].sort((a, b) => a - b)).toEqual(
+      [exactRouteA.id, exactRouteB.id].sort((a, b) => a - b),
+    );
   });
 
   it('syncs explicit-group routing strategy to unique source routes', async () => {

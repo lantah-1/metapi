@@ -30,6 +30,7 @@ import {
   parseTokenRouteRegexPattern,
 } from '../../shared/tokenRoutePatterns.js';
 import {
+  getSwitchGroupActiveSourceRouteId,
   normalizeTokenRouteMode,
   type RouteDecision,
   type RouteDecisionCandidate,
@@ -63,6 +64,9 @@ interface SelectedChannel {
   tokenValue: string;
   tokenName: string;
   actualModel: string;
+  routeCustomHeaders: string | null;
+  routeHeaderTemplateId: number | null;
+  routeHeaderTemplateHeaders: string | null;
 }
 
 type FailureAwareChannel = {
@@ -1073,6 +1077,7 @@ function filterSiteRuntimeBrokenCandidatesByModel(
 type RouteRow = typeof schema.tokenRoutes.$inferSelect & {
   routeMode: RouteMode;
   sourceRouteIds: number[];
+  routeHeaderTemplateHeaders: string | null;
 };
 type ChannelRow = typeof schema.routeChannels.$inferSelect;
 
@@ -1110,14 +1115,30 @@ async function loadEnabledRoutes(nowMs = Date.now()): Promise<RouteRow[]> {
   const rawRoutes = await db.select().from(schema.tokenRoutes)
     .where(eq(schema.tokenRoutes.enabled, true))
     .all();
-  const explicitGroupRouteIds = rawRoutes
-    .filter((route) => normalizeRouteMode(route.routeMode) === 'explicit_group')
+  const groupRouteIds = rawRoutes
+    .filter((route) => isPublicGroupRoute(route))
     .map((route) => route.id);
-  const sourceRows = explicitGroupRouteIds.length > 0
+  const sourceRows = groupRouteIds.length > 0
     ? await db.select().from(schema.routeGroupSources)
-      .where(inArray(schema.routeGroupSources.groupRouteId, explicitGroupRouteIds))
+      .where(inArray(schema.routeGroupSources.groupRouteId, groupRouteIds))
       .all()
     : [];
+  const routeHeaderTemplateIds = Array.from(new Set<number>(
+    rawRoutes
+      .map((route) => Number(route.customHeaderTemplateId))
+      .filter((id): id is number => Number.isFinite(id) && id > 0),
+  ));
+  const routeHeaderTemplates = routeHeaderTemplateIds.length > 0
+    ? await db.select({
+      id: schema.routeHeaderTemplates.id,
+      headers: schema.routeHeaderTemplates.headers,
+    }).from(schema.routeHeaderTemplates)
+      .where(inArray(schema.routeHeaderTemplates.id, routeHeaderTemplateIds))
+      .all()
+    : [];
+  const routeHeaderTemplateHeadersById = new Map<number, string>(
+    routeHeaderTemplates.map((template) => [template.id, template.headers]),
+  );
   const sourceIdsByRouteId = new Map<number, number[]>();
   for (const row of sourceRows) {
     if (!sourceIdsByRouteId.has(row.groupRouteId)) {
@@ -1129,6 +1150,9 @@ async function loadEnabledRoutes(nowMs = Date.now()): Promise<RouteRow[]> {
     ...route,
     routeMode: normalizeRouteMode(route.routeMode),
     sourceRouteIds: Array.from(new Set(sourceIdsByRouteId.get(route.id) ?? [])),
+    routeHeaderTemplateHeaders: route.customHeaderTemplateId
+      ? routeHeaderTemplateHeadersById.get(route.customHeaderTemplateId) ?? null
+      : null,
   }));
   routeCacheSnapshot = {
     loadedAt: nowMs,
@@ -1144,16 +1168,33 @@ async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<Rout
   }
 
   const enabledRoutes = await loadEnabledRoutes(nowMs);
+  const enabledRouteById = new Map(enabledRoutes.map((item) => [item.id, item]));
   const routeIds = (() => {
-    if (!isExplicitGroupRoute(route)) {
+    if (isExplicitGroupRoute(route)) {
+      return Array.from(new Set(route.sourceRouteIds.filter((routeId) => Number.isFinite(routeId) && routeId > 0)));
+    }
+    if (isSwitchGroupRoute(route)) {
+      const activeSourceRouteId = getSwitchGroupActiveSourceRouteId(route.modelMapping);
+      if (!activeSourceRouteId || !route.sourceRouteIds.includes(activeSourceRouteId)) return [];
+      const activeSourceRoute = enabledRouteById.get(activeSourceRouteId);
+      if (!activeSourceRoute) return [];
+      if (isExplicitGroupRoute(activeSourceRoute)) {
+        return Array.from(new Set(activeSourceRoute.sourceRouteIds.filter((routeId) => Number.isFinite(routeId) && routeId > 0)));
+      }
+      if (isSwitchGroupRoute(activeSourceRoute)) {
+        return [];
+      }
+      return [activeSourceRoute.id];
+    }
+    if (!isPublicGroupRoute(route)) {
       return [route.id];
     }
-    return Array.from(new Set(route.sourceRouteIds.filter((routeId) => Number.isFinite(routeId) && routeId > 0)));
+    return [];
   })();
-  const enabledSourceRoutes = isExplicitGroupRoute(route)
+  const enabledSourceRoutes = isPublicGroupRoute(route)
     ? enabledRoutes.filter((item) => (
       routeIds.includes(item.id)
-      && !isExplicitGroupRoute(item)
+      && !isPublicGroupRoute(item)
       && isExactRouteModelPattern(item.modelPattern)
     ))
     : enabledRoutes.filter((item) => routeIds.includes(item.id));
@@ -1351,6 +1392,15 @@ function isExplicitGroupRoute(route: Pick<RouteRow, 'routeMode'> | Pick<typeof s
   return normalizeRouteMode(route.routeMode) === 'explicit_group';
 }
 
+function isSwitchGroupRoute(route: Pick<RouteRow, 'routeMode'> | Pick<typeof schema.tokenRoutes.$inferSelect, 'routeMode'>): boolean {
+  return normalizeRouteMode(route.routeMode) === 'switch_group';
+}
+
+function isPublicGroupRoute(route: Pick<RouteRow, 'routeMode'> | Pick<typeof schema.tokenRoutes.$inferSelect, 'routeMode'>): boolean {
+  const routeMode = normalizeRouteMode(route.routeMode);
+  return routeMode === 'explicit_group' || routeMode === 'switch_group';
+}
+
 function normalizeRouteDisplayName(displayName: string | null | undefined): string {
   return (displayName || '').trim();
 }
@@ -1361,7 +1411,7 @@ function isRouteDisplayNameMatch(model: string, displayName: string | null | und
 }
 
 function matchesRouteRequestModel(model: string, route: RouteRow): boolean {
-  if (isExplicitGroupRoute(route)) {
+  if (isPublicGroupRoute(route)) {
     return isRouteDisplayNameMatch(model, route.displayName);
   }
   return matchesModelPattern(model, route.modelPattern) || isRouteDisplayNameMatch(model, route.displayName);
@@ -1378,24 +1428,33 @@ function hasCustomDisplayName(route: Pick<RouteRow, 'modelPattern' | 'displayNam
 }
 
 function buildVisibleEnabledRoutes(routes: RouteRow[]): RouteRow[] {
+  const publicGroups = routes.filter((route) => (
+    isPublicGroupRoute(route)
+    && normalizeRouteDisplayName(route.displayName).length > 0
+    && route.sourceRouteIds.length > 0
+  ));
+  if (publicGroups.length > 0) {
+    return publicGroups;
+  }
+
   const exactModelNames = new Set(
     routes
-      .filter((route) => !isExplicitGroupRoute(route) && isExactRouteModelPattern(route.modelPattern))
+      .filter((route) => !isPublicGroupRoute(route) && isExactRouteModelPattern(route.modelPattern))
       .map((route) => (route.modelPattern || '').trim())
       .filter(Boolean),
   );
   const coveringGroups = routes.filter((route) => (
     route.enabled
     && (
-      (isExplicitGroupRoute(route) && normalizeRouteDisplayName(route.displayName).length > 0 && route.sourceRouteIds.length > 0)
-      || (!isExplicitGroupRoute(route) && !isExactRouteModelPattern(route.modelPattern) && hasCustomDisplayName(route))
+      (isPublicGroupRoute(route) && normalizeRouteDisplayName(route.displayName).length > 0 && route.sourceRouteIds.length > 0)
+      || (!isPublicGroupRoute(route) && !isExactRouteModelPattern(route.modelPattern) && hasCustomDisplayName(route))
     )
   ));
 
   if (coveringGroups.length === 0) return routes;
 
   return routes.filter((route) => {
-    if (isExplicitGroupRoute(route)) {
+    if (isPublicGroupRoute(route)) {
       return normalizeRouteDisplayName(route.displayName).length > 0;
     }
     if (!isExactRouteModelPattern(route.modelPattern)) return true;
@@ -1408,7 +1467,7 @@ function buildVisibleEnabledRoutes(routes: RouteRow[]): RouteRow[] {
       if (groupRoute.id === route.id) return false;
       const groupDisplayName = normalizeRouteDisplayName(groupRoute.displayName);
       if (!groupDisplayName || exactModelNames.has(groupDisplayName)) return false;
-      if (isExplicitGroupRoute(groupRoute)) {
+      if (isPublicGroupRoute(groupRoute)) {
         return groupRoute.sourceRouteIds.includes(route.id);
       }
       return matchesModelPattern(exactModel, groupRoute.modelPattern);
@@ -1442,16 +1501,9 @@ function channelSupportsRequestedModel(channelSourceModel: string | null | undef
 }
 
 function isModelAllowedByDownstreamPolicy(requestedModel: string, policy: DownstreamRoutingPolicy): boolean {
-  const supportedPatterns = Array.isArray(policy.supportedModels)
-    ? policy.supportedModels
-    : [];
-  const hasSupportedPatterns = supportedPatterns.length > 0;
-  const hasAllowedRoutes = policy.allowedRouteIds.length > 0;
-  if (!hasSupportedPatterns && !hasAllowedRoutes) return policy.denyAllWhenEmpty === true ? false : true;
-  const matchedSupportedPattern = supportedPatterns.some((pattern) => matchesModelPattern(requestedModel, pattern));
-  if (matchedSupportedPattern) return true;
-  if (hasAllowedRoutes) return true;
-  return false;
+  void requestedModel;
+  void policy;
+  return true;
 }
 
 function parseModelMappingRecord(modelMapping?: string | Record<string, unknown> | null): Record<string, unknown> | null {
@@ -3029,26 +3081,17 @@ export class TokenRouter {
   }
 
   private async findRoute(model: string, downstreamPolicy: DownstreamRoutingPolicy): Promise<RouteMatch | null> {
-    let routes = await loadEnabledRoutes();
+    void downstreamPolicy;
+    const routes = await loadEnabledRoutes();
 
-    const supportedPatterns = Array.isArray(downstreamPolicy.supportedModels)
-      ? downstreamPolicy.supportedModels
-      : [];
-    const matchedSupportedPattern = supportedPatterns.some((pattern) => matchesModelPattern(model, pattern));
-
-    if (downstreamPolicy.allowedRouteIds.length > 0 && !matchedSupportedPattern) {
-      const allowSet = new Set(downstreamPolicy.allowedRouteIds);
-      routes = routes.filter((route) => allowSet.has(route.id));
-    }
-
-    const matchedRoute = routes.find((route) => isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
+    const matchedRoute = routes.find((route) => isPublicGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
       || routes.find((route) => (
-        !isExplicitGroupRoute(route)
+        !isPublicGroupRoute(route)
         && isExactRouteModelPattern(route.modelPattern)
         && (route.modelPattern || '').trim() === model
       ))
-      || routes.find((route) => !isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
-      || routes.find((route) => !isExplicitGroupRoute(route) && matchesModelPattern(model, route.modelPattern));
+      || routes.find((route) => !isPublicGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
+      || routes.find((route) => !isPublicGroupRoute(route) && matchesModelPattern(model, route.modelPattern));
 
     if (!matchedRoute) return null;
 
@@ -3056,9 +3099,7 @@ export class TokenRouter {
   }
 
   private async findRouteById(routeId: number, downstreamPolicy: DownstreamRoutingPolicy): Promise<RouteMatch | null> {
-    if (downstreamPolicy.allowedRouteIds.length > 0 && !downstreamPolicy.allowedRouteIds.includes(routeId)) {
-      return null;
-    }
+    void downstreamPolicy;
 
     const route = (await loadEnabledRoutes()).find((item) => item.id === routeId);
     if (!route) return null;
@@ -3112,14 +3153,6 @@ export class TokenRouter {
 
     if (isSiteDisabled(memberCandidate.site.status)) {
       reasonParts.push(`站点状态=${memberCandidate.site.status || 'disabled'}`);
-    }
-
-    const downstreamExclusionReason = this.resolveDownstreamExclusionReason(
-      this.buildRouteUnitMemberDispatchCandidate(outerCandidate, memberCandidate),
-      options.downstreamPolicy,
-    );
-    if (downstreamExclusionReason) {
-      reasonParts.push(downstreamExclusionReason);
     }
 
     const tokenValue = this.resolveRouteUnitMemberTokenValue(memberCandidate);
@@ -3271,55 +3304,6 @@ export class TokenRouter {
     return null;
   }
 
-  private resolveDownstreamExclusionReason(
-    candidate: RouteChannelCandidate,
-    downstreamPolicy?: DownstreamRoutingPolicy,
-  ): string | null {
-    if (!downstreamPolicy) return null;
-
-    const excludedSiteIds = Array.isArray(downstreamPolicy.excludedSiteIds)
-      ? downstreamPolicy.excludedSiteIds
-      : [];
-    if (excludedSiteIds.includes(candidate.site.id)) {
-      return '站点已被下游密钥排除';
-    }
-
-    const excludedCredentialRefs = Array.isArray(downstreamPolicy.excludedCredentialRefs)
-      ? downstreamPolicy.excludedCredentialRefs
-      : [];
-    if (excludedCredentialRefs.length <= 0) {
-      return null;
-    }
-
-    for (const ref of excludedCredentialRefs) {
-      if (ref.kind === 'account_token') {
-        if (
-          candidate.channel.tokenId === ref.tokenId
-          && candidate.token?.id === ref.tokenId
-          && candidate.account.id === ref.accountId
-          && candidate.site.id === ref.siteId
-        ) {
-          return 'API Key/令牌已被下游密钥排除';
-        }
-        continue;
-      }
-
-      if (
-        candidate.channel.tokenId == null
-        && candidate.account.id === ref.accountId
-        && candidate.site.id === ref.siteId
-      ) {
-        const resolvedTokenValue = this.resolveChannelTokenValue(candidate);
-        const accountApiToken = candidate.account.apiToken?.trim() || '';
-        if (resolvedTokenValue && accountApiToken && resolvedTokenValue === accountApiToken) {
-          return 'API Key/令牌已被下游密钥排除';
-        }
-      }
-    }
-
-    return null;
-  }
-
   private getCandidateEligibilityReasons(
     candidate: RouteChannelCandidate,
     options: CandidateEligibilityOptions,
@@ -3357,11 +3341,6 @@ export class TokenRouter {
 
     if (isSiteDisabled(candidate.site.status)) {
       reasonParts.push(`站点状态=${candidate.site.status || 'disabled'}`);
-    }
-
-    const downstreamExclusionReason = this.resolveDownstreamExclusionReason(candidate, options.downstreamPolicy);
-    if (downstreamExclusionReason) {
-      reasonParts.push(downstreamExclusionReason);
     }
 
     if (excludeChannelIds.includes(candidate.channel.id)) {
@@ -3506,6 +3485,9 @@ export class TokenRouter {
       tokenValue,
       tokenName: dispatchCandidate.token?.name || 'default',
       actualModel,
+      routeCustomHeaders: match.route.customHeaders ?? null,
+      routeHeaderTemplateId: match.route.customHeaderTemplateId ?? null,
+      routeHeaderTemplateHeaders: match.route.routeHeaderTemplateHeaders ?? null,
     };
   }
 
@@ -3609,18 +3591,12 @@ export class TokenRouter {
       }
 
       let contribution = baseContributions[i] / siteChannels;
-      const downstreamSiteMultiplier = downstreamPolicy.siteWeightMultipliers[candidate.site.id] ?? 1;
-      const normalizedDownstreamSiteMultiplier =
-        (Number.isFinite(downstreamSiteMultiplier) && downstreamSiteMultiplier > 0)
-          ? downstreamSiteMultiplier
-          : 1;
       const siteGlobalWeight =
         (Number.isFinite(candidate.site.globalWeight) && (candidate.site.globalWeight || 0) > 0)
           ? (candidate.site.globalWeight as number)
           : 1;
-      const combinedSiteWeight = siteGlobalWeight * normalizedDownstreamSiteMultiplier;
-      if (combinedSiteWeight > 0 && Number.isFinite(combinedSiteWeight)) {
-        contribution *= combinedSiteWeight;
+      if (siteGlobalWeight > 0 && Number.isFinite(siteGlobalWeight)) {
+        contribution *= siteGlobalWeight;
       }
 
       contribution *= runtimeMultiplier;
@@ -3661,16 +3637,10 @@ export class TokenRouter {
         ? '实测'
         : (cost?.source === 'configured' ? '配置' : (cost?.source === 'catalog' ? '目录' : '默认'));
       const siteChannels = Math.max(1, siteChannelCounts.get(candidate.site.id) || 1);
-      const downstreamSiteMultiplier = downstreamPolicy.siteWeightMultipliers[candidate.site.id] ?? 1;
-      const normalizedDownstreamSiteMultiplier =
-        (Number.isFinite(downstreamSiteMultiplier) && downstreamSiteMultiplier > 0)
-          ? downstreamSiteMultiplier
-          : 1;
       const siteGlobalWeight =
         (Number.isFinite(candidate.site.globalWeight) && (candidate.site.globalWeight || 0) > 0)
           ? (candidate.site.globalWeight as number)
           : 1;
-      const combinedSiteWeight = siteGlobalWeight * normalizedDownstreamSiteMultiplier;
       const siteRuntimeDetail = runtimeHealthDetails[i];
       const siteHistoricalHealth = siteHistoricalHealthMetrics.get(candidate.site.id);
       const siteHistoricalMultiplier = siteHistoricalHealth?.multiplier ?? 1;
@@ -3710,8 +3680,8 @@ export class TokenRouter {
           ? `${reasonPrefix}，近期成功率=${recentSuccessRateText}（样本=${siteRuntimeDetail.recentSampleCount.toFixed(2)}，置信=${siteRuntimeDetail.recentConfidence.toFixed(2)}），回退成功率=${historicalSuccessRateText}，综合近期成功率=${stableFirstSuccessRateText}，运行时健康=${runtimeHealthText}，会话负载=${runtimeLoadText}，同站点通道=${siteChannels}${stablePoolText}，评分占比≈${(probability * 100).toFixed(1)}%）`
           : (
             candidates.length === 1
-              ? `${reasonPrefix}，W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，会话负载=${runtimeLoadText}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`
-              : `按权重随机（W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，会话负载=${runtimeLoadText}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`
+              ? `${reasonPrefix}，W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，会话负载=${runtimeLoadText}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`
+              : `按权重随机（W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，会话负载=${runtimeLoadText}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`
           ),
       };
     });

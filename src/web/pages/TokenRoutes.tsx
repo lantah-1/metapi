@@ -1,114 +1,85 @@
-import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import type { DragEndEvent } from '@dnd-kit/core';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../api.js';
-import { BrandGlyph, getBrand, InlineBrandIcon, type BrandInfo } from '../components/BrandIcon.js';
-import { useToast } from '../components/Toast.js';
+import { BrandGlyph } from '../components/BrandIcon.js';
 import ModernSelect from '../components/ModernSelect.js';
-import { MobileCard, MobileField } from '../components/MobileCard.js';
-import ResponsiveFilterPanel from '../components/ResponsiveFilterPanel.js';
-import { useIsMobile } from '../components/useIsMobile.js';
-import { tr } from '../i18n.js';
-import { ROUTE_DECISION_REFRESH_TASK_TYPE } from '../../shared/tokenRouteContract.js';
-import {
-  buildRouteModelCandidatesIndex,
-  type RouteCandidateView,
-  type RouteModelCandidatesByModelName,
-} from './helpers/routeModelCandidatesIndex.js';
-import { getInitialVisibleCount, getNextVisibleCount } from './helpers/progressiveRender.js';
-import {
-  buildRouteMissingTokenIndex,
-  normalizeMissingTokenModels,
-  type MissingTokenModelsByName,
-  type RouteMissingTokenHint,
-} from './helpers/routeMissingTokenHints.js';
-import { buildVisibleRouteList } from './helpers/routeListVisibility.js';
-import { buildZeroChannelPlaceholderRoutes } from './helpers/zeroChannelRoutes.js';
+import { useToast } from '../components/Toast.js';
 import {
   getRouteRoutingStrategyDescription,
   getRouteRoutingStrategyLabel,
   normalizeRouteRoutingStrategyValue,
 } from './token-routes/routingStrategy.js';
-
-import type {
-  RouteSortBy,
-  RouteSortDir,
-  GroupFilter,
-  RouteSummaryRow,
-  RouteRoutingStrategy,
-  RouteMode,
-  RouteDecision,
-  RouteIconOption,
-  MissingTokenRouteSiteActionItem,
-  MissingTokenGroupRouteSiteActionItem,
-  GroupRouteItem,
-} from './token-routes/types.js';
+import type { RouteHeaderTemplate, RouteRoutingStrategy, RouteSummaryRow } from './token-routes/types.js';
 import {
-  ROUTE_RENDER_CHUNK,
-  isExplicitGroupRoute,
-  isExactModelPattern,
+  isPublicGroupRoute,
   isRouteExactModel,
-  matchesModelPattern,
-  normalizeRouteMode,
-  resolveRouteTitle,
+  isSwitchGroupRoute,
   resolveRouteBrand,
-  resolveRouteIcon,
-  toBrandIconValue,
-  normalizeRouteDisplayIconValue,
-  inferEndpointTypesFromPlatform,
-  getModelPatternError,
+  resolveRouteTitle,
 } from './token-routes/utils.js';
-import { applyPriorityRailDrop, isPriorityRailNewLayerId } from './token-routes/priorityRail.js';
-import { useRouteChannels } from './token-routes/useRouteChannels.js';
-import RouteFilterBar, { type EnabledFilter } from './token-routes/RouteFilterBar.js';
-import ManualRoutePanel from './token-routes/ManualRoutePanel.js';
-import RouteCard from './token-routes/RouteCard.js';
-import AddChannelModal from './token-routes/AddChannelModal.js';
+import {
+  getSwitchGroupActiveSourceRouteId,
+  type RouteMode,
+} from '../../shared/tokenRouteContract.js';
+import {
+  emptyCustomHeaderField,
+  parseCustomHeadersForEditor,
+  serializeCustomHeaders,
+  type CustomHeaderField,
+} from './helpers/customHeaders.js';
 
-const EMPTY_ROUTE_CANDIDATE_VIEW: RouteCandidateView = {
-  routeCandidates: [],
-  accountOptions: [],
-  tokenOptionsByAccountId: {},
-};
-const EMPTY_MISSING_ITEMS: MissingTokenRouteSiteActionItem[] = [];
-const EMPTY_MISSING_GROUP_ITEMS: MissingTokenGroupRouteSiteActionItem[] = [];
-const ROUTE_ICON_OPTIONS: RouteIconOption[] = [
-  { value: '', label: '自动品牌图标', description: '按模型匹配规则自动识别品牌', iconText: '✦' },
+const STRATEGY_OPTIONS: Array<{
+  value: RouteRoutingStrategy;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: 'weighted',
+    label: getRouteRoutingStrategyLabel('weighted'),
+    description: '综合权重、成本、健康度选择成员',
+  },
+  {
+    value: 'round_robin',
+    label: getRouteRoutingStrategyLabel('round_robin'),
+    description: '按成员顺序轮流请求',
+  },
+  {
+    value: 'stable_first',
+    label: getRouteRoutingStrategyLabel('stable_first'),
+    description: '优先复用稳定供应商，异常时切换',
+  },
 ];
 
-type RouteEditorForm = {
-  routeMode: RouteMode;
-  displayName: string;
-  displayIcon: string;
-  modelPattern: string;
+type GroupForm = {
+  mode: Extract<RouteMode, 'explicit_group' | 'switch_group'>;
+  name: string;
+  autoQuery: string;
+  routingStrategy: RouteRoutingStrategy;
   sourceRouteIds: number[];
-  advancedOpen: boolean;
+  activeSourceRouteId: number | null;
+  customHeaderTemplateId: number | null;
+  customHeaders: CustomHeaderField[];
+  enabled: boolean;
 };
 
-const EMPTY_ROUTE_FORM: RouteEditorForm = {
-  routeMode: 'explicit_group',
-  displayName: '',
-  displayIcon: '',
-  modelPattern: '',
+const EMPTY_FORM: GroupForm = {
+  mode: 'explicit_group',
+  name: '',
+  autoQuery: '',
+  routingStrategy: 'stable_first',
   sourceRouteIds: [],
-  advancedOpen: false,
+  activeSourceRouteId: null,
+  customHeaderTemplateId: null,
+  customHeaders: [emptyCustomHeaderField()],
+  enabled: true,
 };
-const DESKTOP_DETAIL_ENTER_MS = 260;
+
 const DESKTOP_DETAIL_COLLAPSE_MS = 200;
 
 function prefersReducedMotion(): boolean {
   return typeof globalThis.matchMedia === 'function'
     && globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches;
-}
-
-function getRouteRoutingStrategySuccessMessage(value: RouteRoutingStrategy): string {
-  if (value === 'round_robin') return '已切换为轮询策略';
-  if (value === 'stable_first') return '已切换为稳定优先策略';
-  return '已切换为权重随机策略';
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 export function DesktopDetailPanelPresence({
@@ -119,1922 +90,1378 @@ export function DesktopDetailPanelPresence({
   children: (closing: boolean) => JSX.Element;
 }) {
   const [shouldRender, setShouldRender] = useState(open);
-  const [isOpen, setIsOpen] = useState(open);
-  const [isEntering, setIsEntering] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
-  const hasEverOpenedRef = useRef(open);
 
   useEffect(() => {
-    const reduceMotion = prefersReducedMotion();
-
     if (open) {
-      hasEverOpenedRef.current = true;
       setShouldRender(true);
-      setIsOpen(true);
-      setIsClosing(false);
-      if (reduceMotion) {
-        setIsEntering(false);
-        return undefined;
-      }
-      setIsEntering(true);
-      const enterTimerId = globalThis.setTimeout(() => {
-        setIsEntering(false);
-      }, DESKTOP_DETAIL_ENTER_MS);
-      return () => globalThis.clearTimeout(enterTimerId);
-    }
-
-    if (!hasEverOpenedRef.current) {
-      setShouldRender(false);
-      setIsOpen(false);
-      setIsEntering(false);
       setIsClosing(false);
       return undefined;
     }
 
-    setIsOpen(false);
-    setIsEntering(false);
-    if (reduceMotion) {
+    if (prefersReducedMotion()) {
       setShouldRender(false);
       setIsClosing(false);
       return undefined;
     }
+
     setIsClosing(true);
     const timerId = globalThis.setTimeout(() => {
       setShouldRender(false);
       setIsClosing(false);
     }, DESKTOP_DETAIL_COLLAPSE_MS);
-
     return () => globalThis.clearTimeout(timerId);
   }, [open]);
 
   if (!shouldRender) return null;
   return (
-    <div
-      className={`route-detail-panel-presence ${isOpen ? 'is-open' : ''} ${isEntering ? 'is-entering' : ''} ${isClosing ? 'is-closing' : ''}`.trim()}
-      style={{ gridColumn: '1 / -1' }}
-    >
+    <div className={`route-detail-panel-presence ${open ? 'is-open' : ''} ${isClosing ? 'is-closing' : ''}`.trim()}>
       {children(isClosing)}
     </div>
   );
 }
 
+function normalizeComparable(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function getModelAlias(modelName: string): string {
+  const normalized = normalizeComparable(modelName);
+  const slashIndex = normalized.lastIndexOf('/');
+  if (slashIndex >= 0 && slashIndex < normalized.length - 1) {
+    return normalized.slice(slashIndex + 1);
+  }
+  return normalized;
+}
+
+function sourceModelMatchesQuery(modelName: string, query: string): boolean {
+  const normalizedModel = normalizeComparable(modelName);
+  const normalizedQuery = normalizeComparable(query);
+  if (!normalizedModel || !normalizedQuery) return false;
+  if (normalizedModel === normalizedQuery) return true;
+  if (getModelAlias(normalizedModel) === normalizedQuery) return true;
+  if (normalizedModel.endsWith(`/${normalizedQuery}`)) return true;
+  return normalizedQuery.length >= 4 && normalizedModel.includes(normalizedQuery);
+}
+
+function buildGroupForm(route?: RouteSummaryRow | null): GroupForm {
+  if (!route) return EMPTY_FORM;
+  const name = resolveRouteTitle(route);
+  const mode = isSwitchGroupRoute(route) ? 'switch_group' : 'explicit_group';
+  const activeSourceRouteId = typeof route.activeSourceRouteId === 'number'
+    ? route.activeSourceRouteId
+    : getSwitchGroupActiveSourceRouteId(route.modelMapping);
+  return {
+    mode,
+    name,
+    autoQuery: name,
+    routingStrategy: normalizeRouteRoutingStrategyValue(route.routingStrategy),
+    sourceRouteIds: [...(route.sourceRouteIds || [])],
+    activeSourceRouteId,
+    customHeaderTemplateId: route.customHeaderTemplateId ?? null,
+    customHeaders: parseCustomHeadersForEditor(route.customHeaders),
+    enabled: route.enabled,
+  };
+}
+
+function formatCount(count: number, unit: string): string {
+  return `${Math.max(0, count)} ${unit}`;
+}
+
+function getSupplierNames(route: RouteSummaryRow): string[] {
+  const names = route.siteNames
+    .map((name) => name.trim())
+    .filter(Boolean);
+  return Array.from(new Set(names));
+}
+
+function countHeaderFields(fields: CustomHeaderField[]): number {
+  return fields.filter((field) => field.key.trim().length > 0 || field.value.trim().length > 0).length;
+}
+
+function countSerializedHeaders(raw: unknown): number {
+  return countHeaderFields(parseCustomHeadersForEditor(raw));
+}
+
+function getSupplierStatuses(route: RouteSummaryRow): Array<{ key: string; name: string; status: string }> {
+  if (Array.isArray(route.siteStatuses) && route.siteStatuses.length > 0) {
+    const seen = new Set<string>();
+    const suppliers: Array<{ key: string; name: string; status: string }> = [];
+    for (const item of route.siteStatuses) {
+      const name = String(item?.name || '').trim();
+      if (!name) continue;
+      const id = typeof item.id === 'number' && Number.isFinite(item.id) ? Math.trunc(item.id) : null;
+      const key = id != null ? `site:${id}` : `name:${name.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      suppliers.push({
+        key,
+        name,
+        status: String(item.status || 'active').trim() || 'active',
+      });
+    }
+    return suppliers;
+  }
+
+  return getSupplierNames(route).map((name) => ({
+    key: `name:${name.toLowerCase()}`,
+    name,
+    status: 'active',
+  }));
+}
+
+function getGroupModeLabel(routeOrMode: Pick<RouteSummaryRow, 'routeMode'> | GroupForm['mode']): string {
+  const routeMode = typeof routeOrMode === 'string' ? routeOrMode : routeOrMode.routeMode;
+  return routeMode === 'switch_group' ? '切换分组' : '普通分组';
+}
+
+function getSourceTargetLabel(route: RouteSummaryRow): string {
+  return isPublicGroupRoute(route) ? resolveRouteTitle(route) : route.modelPattern;
+}
+
+function getSourceTargetTypeLabel(route: RouteSummaryRow): string {
+  if (isSwitchGroupRoute(route)) return '切换分组';
+  return isPublicGroupRoute(route) ? '普通分组' : '供应商单模型';
+}
+
+function getSourceTargetTypeShortLabel(route: RouteSummaryRow): string {
+  if (isSwitchGroupRoute(route)) return '切换';
+  return isPublicGroupRoute(route) ? '分组' : '单模';
+}
+
+function getSourceTargetSupplierSummary(route: RouteSummaryRow): string {
+  const suppliers = getSupplierNames(route);
+  if (suppliers.length <= 0) return '';
+  const visible = suppliers.slice(0, 3).join('、');
+  return suppliers.length > 3 ? `${visible} +${suppliers.length - 3}` : visible;
+}
+
+function getSourceTargetDescription(route: RouteSummaryRow): string {
+  return [
+    getSourceTargetTypeLabel(route),
+    formatCount(route.enabledChannelCount, '可用通道'),
+    getSourceTargetSupplierSummary(route),
+  ].filter(Boolean).join(' / ');
+}
+
+function getSourceTargetTypePill(route: RouteSummaryRow): ReactNode {
+  return (
+    <span className={`model-group-target-kind-pill ${isPublicGroupRoute(route) ? 'is-group' : 'is-model'}`.trim()}>
+      {getSourceTargetTypeShortLabel(route)}
+    </span>
+  );
+}
+
+function sourceTargetMatchesQuery(route: RouteSummaryRow, query: string): boolean {
+  if (!query) return true;
+  return [
+    getSourceTargetLabel(route),
+    getSourceTargetTypeLabel(route),
+    resolveRouteTitle(route),
+    route.siteNames.join(' '),
+  ].join(' ').toLowerCase().includes(query);
+}
+
+function sortSourceTargets(routes: RouteSummaryRow[], selectedRouteIds: Set<number>): RouteSummaryRow[] {
+  return [...routes].sort((left, right) => {
+    const leftSelected = selectedRouteIds.has(left.id) ? 0 : 1;
+    const rightSelected = selectedRouteIds.has(right.id) ? 0 : 1;
+    if (leftSelected !== rightSelected) return leftSelected - rightSelected;
+    return getSourceTargetLabel(left).localeCompare(getSourceTargetLabel(right), undefined, { sensitivity: 'base' });
+  });
+}
+
+function sortSwitchTargetsByKind(routes: RouteSummaryRow[]): RouteSummaryRow[] {
+  return [...routes].sort((left, right) => {
+    const leftKind = isPublicGroupRoute(left) ? 0 : 1;
+    const rightKind = isPublicGroupRoute(right) ? 0 : 1;
+    if (leftKind !== rightKind) return leftKind - rightKind;
+    return getSourceTargetLabel(left).localeCompare(getSourceTargetLabel(right), undefined, { sensitivity: 'base' });
+  });
+}
+
+function filterAndSortSourceTargets(
+  routes: RouteSummaryRow[],
+  sourceSearch: string,
+  selectedRouteIds: Set<number>,
+): RouteSummaryRow[] {
+  const query = normalizeComparable(sourceSearch);
+  return sortSourceTargets(routes.filter((route) => sourceTargetMatchesQuery(route, query)), selectedRouteIds);
+}
+
+function countSelectedSourceTargets(routes: RouteSummaryRow[], selectedRouteIds: Set<number>): number {
+  return routes.reduce((total, route) => total + (selectedRouteIds.has(route.id) ? 1 : 0), 0);
+}
+
+function ModelGlyph({ model, size = 20 }: { model: string; size?: number }) {
+  return (
+    <BrandGlyph
+      model={model}
+      size={size}
+      fallbackText={model}
+      style={{ borderRadius: Math.max(5, Math.round(size * 0.3)) }}
+    />
+  );
+}
+
+function FieldLabel({ children }: { children: ReactNode }) {
+  return <div className="model-group-field-label">{children}</div>;
+}
+
+function BodyPortal({ children }: { children: ReactNode }) {
+  const canUsePortal = typeof document !== 'undefined'
+    && !!document.body
+    && typeof document.body.appendChild === 'function'
+    && typeof document.body.removeChild === 'function';
+
+  useEffect(() => {
+    if (!canUsePortal) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [canUsePortal]);
+
+  return canUsePortal ? createPortal(children, document.body) : <>{children}</>;
+}
+
 export default function TokenRoutes() {
-  const navigate = useNavigate();
-  const [routeSummaries, setRouteSummaries] = useState<RouteSummaryRow[]>([]);
-  const [modelCandidates, setModelCandidates] = useState<RouteModelCandidatesByModelName>({});
-  const [missingTokenModelsByName, setMissingTokenModelsByName] = useState<MissingTokenModelsByName>({});
-  const [missingTokenGroupModelsByName, setMissingTokenGroupModelsByName] = useState<MissingTokenModelsByName>({});
-  const [endpointTypesByModel, setEndpointTypesByModel] = useState<Record<string, string[]>>({});
-
-  const [search, setSearch] = useState('');
-  const [activeBrand, setActiveBrand] = useState<string | null>(null);
-  const [activeSite, setActiveSite] = useState<string | null>(null);
-  const [activeEndpointType, setActiveEndpointType] = useState<string | null>(null);
-  const [activeGroupFilter, setActiveGroupFilter] = useState<GroupFilter>(null);
-  const [enabledFilter, setEnabledFilter] = useState<EnabledFilter>('all');
-  const [filterCollapsed, setFilterCollapsed] = useState(true);
-  const [showFilters, setShowFilters] = useState(false);
-  const [showZeroChannelRoutes, setShowZeroChannelRoutes] = useState(false);
-  const [sortBy, setSortBy] = useState<RouteSortBy>('channelCount');
-  const [sortDir, setSortDir] = useState<RouteSortDir>('desc');
-
-  const [showManual, setShowManual] = useState(false);
-  const [form, setForm] = useState<RouteEditorForm>(EMPTY_ROUTE_FORM);
-  const [editingRouteId, setEditingRouteId] = useState<number | null>(null);
+  const toast = useToast();
+  const [routes, setRoutes] = useState<RouteSummaryRow[]>([]);
+  const [headerTemplates, setHeaderTemplates] = useState<RouteHeaderTemplate[]>([]);
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
-  const [batchUpdatingRoutes, setBatchUpdatingRoutes] = useState(false);
-  const [batchSelectMode, setBatchSelectMode] = useState(false);
-  const [selectedRouteIds, setSelectedRouteIds] = useState<Set<number>>(new Set());
-
-  const [channelTokenDraft, setChannelTokenDraft] = useState<Record<number, number>>({});
-  const [updatingChannel, setUpdatingChannel] = useState<Record<number, boolean>>({});
-  const [savingPriorityByRoute, setSavingPriorityByRoute] = useState<Record<number, boolean>>({});
-  const [updatingRoutingStrategyByRoute, setUpdatingRoutingStrategyByRoute] = useState<Record<number, boolean>>({});
-  const [clearingCooldownByRoute, setClearingCooldownByRoute] = useState<Record<number, boolean>>({});
-
-  const [decisionByRoute, setDecisionByRoute] = useState<Record<number, RouteDecision | null>>({});
-  const [loadingDecision, setLoadingDecision] = useState(false);
-  const [decisionAutoSkipped, setDecisionAutoSkipped] = useState(false);
-  const [visibleRouteCount, setVisibleRouteCount] = useState(ROUTE_RENDER_CHUNK);
-  const [expandedSourceGroupMap, setExpandedSourceGroupMap] = useState<Record<string, boolean>>({});
-  const [expandedRouteIds, setExpandedRouteIds] = useState<number[]>([]);
-  const [closingDesktopDetailRouteIds, setClosingDesktopDetailRouteIds] = useState<number[]>([]);
-  const [addChannelModalRouteId, setAddChannelModalRouteId] = useState<number | null>(null);
-  const isMobile = useIsMobile();
-  const desktopDetailCloseTimersRef = useRef<Record<number, ReturnType<typeof globalThis.setTimeout>>>({});
-
-  const {
-    channelsByRouteId,
-    loadingChannelsByRouteId,
-    loadChannels,
-    invalidateChannels,
-    setChannels,
-  } = useRouteChannels();
-
-  const toast = useToast();
-
-  const candidatesLoadedRef = useRef(false);
-  const candidatesPromiseRef = useRef<Promise<void> | null>(null);
-  const candidatesVersionRef = useRef(0);
-  const candidatesSeqRef = useRef(0);
-  const decisionRefreshWatchSeqRef = useRef(0);
+  const [quickSwitchingRouteId, setQuickSwitchingRouteId] = useState<number | null>(null);
+  const [editingRouteId, setEditingRouteId] = useState<number | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [form, setForm] = useState<GroupForm>(EMPTY_FORM);
+  const [search, setSearch] = useState('');
+  const [sourceSearch, setSourceSearch] = useState('');
+  const [expandedGroupIds, setExpandedGroupIds] = useState<number[]>([]);
   const mountedRef = useRef(true);
 
-  const loadCandidates = (force?: boolean) => {
-    if (candidatesLoadedRef.current && !force) return;
-    if (candidatesPromiseRef.current && !force) return;
-    const seq = ++candidatesSeqRef.current;
-    candidatesLoadedRef.current = true;
-    let promise!: Promise<void>;
-    promise = (async () => {
-      try {
-        const candidateRows = await api.getModelTokenCandidates();
-        if (candidatesSeqRef.current !== seq) return; // stale
-        startTransition(() => {
-          setModelCandidates((candidateRows?.models || {}) as RouteModelCandidatesByModelName);
-          setMissingTokenModelsByName(
-            normalizeMissingTokenModels((candidateRows?.modelsWithoutToken || {}) as MissingTokenModelsByName),
-          );
-          setMissingTokenGroupModelsByName(
-            normalizeMissingTokenModels((candidateRows?.modelsMissingTokenGroups || {}) as MissingTokenModelsByName),
-          );
-          setEndpointTypesByModel(candidateRows?.endpointTypesByModel || {});
-        });
-        candidatesVersionRef.current = Date.now();
-      } catch {
-        if (candidatesSeqRef.current === seq) candidatesLoadedRef.current = false;
-      } finally {
-        if (candidatesPromiseRef.current === promise) {
-          candidatesPromiseRef.current = null;
-        }
-      }
-    })();
-    candidatesPromiseRef.current = promise;
-  };
-
   const load = async () => {
-    const summaryRows = await api.getRoutesSummary();
-
-    const summaries = (summaryRows || []) as RouteSummaryRow[];
-    setRouteSummaries(summaries);
-    const decisionPlaceholder: Record<number, RouteDecision | null> = {};
-    for (const route of summaries) {
-      decisionPlaceholder[route.id] = route.decisionSnapshot || null;
-    }
-    setDecisionByRoute(decisionPlaceholder);
-    setDecisionAutoSkipped(
-      summaries.some((route) => isRouteExactModel(route) && !route.decisionSnapshot),
-    );
-
-    // Silently refresh candidates in the background if already loaded
-    if (candidatesLoadedRef.current) {
-      loadCandidates(true);
-    }
+    const [rows, templates] = await Promise.all([
+      api.getRoutesSummary(),
+      api.getRouteHeaderTemplates(),
+    ]);
+    if (!mountedRef.current) return;
+    setRoutes((rows || []) as RouteSummaryRow[]);
+    setHeaderTemplates((templates || []) as RouteHeaderTemplate[]);
   };
-
-  const loadRef = useRef(load);
-  loadRef.current = load;
-
-  const toastRef = useRef(toast);
-  toastRef.current = toast;
-
-  const monitorRouteDecisionRefreshTask = useCallback((taskId: string) => {
-    const normalizedTaskId = String(taskId || '').trim();
-    if (!normalizedTaskId) return;
-
-    const taskFetcher = (api as { getTask?: (id: string) => Promise<unknown> }).getTask;
-    if (typeof taskFetcher !== 'function') {
-      setLoadingDecision(false);
-      return;
-    }
-
-    const watchSeq = ++decisionRefreshWatchSeqRef.current;
-    setLoadingDecision(true);
-    setDecisionAutoSkipped(false);
-
-    void (async () => {
-      while (mountedRef.current && decisionRefreshWatchSeqRef.current === watchSeq) {
-        try {
-          const taskResponse = await taskFetcher(normalizedTaskId) as {
-            task?: { status?: string; message?: string; error?: string | null };
-          };
-          const task = taskResponse?.task;
-          if (!task) {
-            throw new Error('路由选中概率任务不存在');
-          }
-
-          const status = String(task.status || '').trim();
-          if (status === 'pending' || status === 'running') {
-            await new Promise((resolve) => setTimeout(resolve, 1200));
-            continue;
-          }
-
-          if (!mountedRef.current || decisionRefreshWatchSeqRef.current !== watchSeq) return;
-          await loadRef.current();
-          if (!mountedRef.current || decisionRefreshWatchSeqRef.current !== watchSeq) return;
-
-          setLoadingDecision(false);
-          if (status === 'succeeded') {
-            toastRef.current.success('路由选择概率已刷新');
-          } else {
-            toastRef.current.error(String(task.message || task.error || '刷新路由选择概率失败'));
-          }
-          return;
-        } catch (error: any) {
-          if (!mountedRef.current || decisionRefreshWatchSeqRef.current !== watchSeq) return;
-          setLoadingDecision(false);
-          toastRef.current.error(error?.message || '刷新路由选择概率失败');
-          return;
-        }
-      }
-    })();
-  }, []);
-
-  const resumeRouteDecisionRefreshTask = useCallback(async () => {
-    const tasksFetcher = (api as { getTasks?: (limit?: number) => Promise<unknown> }).getTasks;
-    if (typeof tasksFetcher !== 'function') {
-      setLoadingDecision(false);
-      return;
-    }
-
-    try {
-      const tasksResponse = await tasksFetcher(50) as {
-        tasks?: Array<{ id?: string; type?: string; status?: string }>;
-      };
-      const runningTask = Array.isArray(tasksResponse?.tasks)
-        ? tasksResponse.tasks.find((task) => (
-          String(task?.type || '').trim() === ROUTE_DECISION_REFRESH_TASK_TYPE
-          && (task?.status === 'pending' || task?.status === 'running')
-        ))
-        : null;
-      const taskId = String(runningTask?.id || '').trim();
-      if (!taskId) {
-        setLoadingDecision(false);
-        return;
-      }
-      monitorRouteDecisionRefreshTask(taskId);
-    } catch {
-      setLoadingDecision(false);
-    }
-  }, [monitorRouteDecisionRefreshTask]);
 
   useEffect(() => {
     mountedRef.current = true;
-    (async () => {
+    void (async () => {
       try {
-        await resumeRouteDecisionRefreshTask();
+        setLoading(true);
         await load();
-      } catch {
-        toast.error('加载路由配置失败');
+      } catch (error: any) {
+        toast.error(error?.message || '加载模型分组失败');
+      } finally {
+        if (mountedRef.current) setLoading(false);
       }
-      // Preload candidates in background after first paint
-      const scheduleIdle = typeof requestIdleCallback === 'function' ? requestIdleCallback : (cb: () => void) => setTimeout(cb, 0);
-      scheduleIdle(() => loadCandidates());
     })();
     return () => {
       mountedRef.current = false;
-      decisionRefreshWatchSeqRef.current += 1;
     };
-  }, [resumeRouteDecisionRefreshTask, toast]);
+  }, [toast]);
 
-  const handleRebuild = async () => {
-    try {
-      setRebuilding(true);
-      const res = await api.rebuildRoutes(true);
-      if (res?.queued) {
-        toast.info(res.message || '已开始重建路由，请稍后查看日志');
-        invalidateChannels();
-        await load();
-        return;
-      }
-      const createdRoutes = res?.rebuild?.createdRoutes ?? 0;
-      const createdChannels = res?.rebuild?.createdChannels ?? 0;
-      toast.success(`自动重建完成（新增 ${createdRoutes} 条路由 / ${createdChannels} 个通道）`);
-      invalidateChannels();
-      await load();
-    } catch (e: any) {
-      toast.error(e.message || '重建路由失败');
-    } finally {
-      setRebuilding(false);
-    }
-  };
-
-  const handleRefreshRouteDecisions = async () => {
-    try {
-      const response = await api.refreshRouteDecisionSnapshots() as {
-        message?: string;
-        jobId?: string;
-      };
-      const taskId = String(response?.jobId || '').trim();
-      if (!taskId) {
-        throw new Error('刷新任务未返回 taskId');
-      }
-
-      toast.info(response?.message || '已开始后台刷新路由选中概率，可稍后返回查看');
-      monitorRouteDecisionRefreshTask(taskId);
-    } catch (error: any) {
-      toast.error(error?.message || '刷新路由选择概率失败');
-    }
-  };
-
-  const exactRouteCount = useMemo(
-    () => buildVisibleRouteList(routeSummaries, isExactModelPattern, matchesModelPattern)
-      .filter((route) => isRouteExactModel(route)).length,
-    [routeSummaries],
+  const exactRoutes = useMemo(
+    () => routes
+      .filter((route) => isRouteExactModel(route))
+      .sort((left, right) => left.modelPattern.localeCompare(right.modelPattern, undefined, { sensitivity: 'base' })),
+    [routes],
   );
 
-  const zeroChannelPlaceholderRoutes = useMemo(
-    () => buildZeroChannelPlaceholderRoutes(routeSummaries, missingTokenModelsByName, missingTokenGroupModelsByName),
-    [routeSummaries, missingTokenModelsByName, missingTokenGroupModelsByName],
+  const groupRoutes = useMemo(
+    () => routes
+      .filter((route) => isPublicGroupRoute(route))
+      .sort((left, right) => resolveRouteTitle(left).localeCompare(resolveRouteTitle(right), undefined, { sensitivity: 'base' })),
+    [routes],
   );
 
-  const visibleRouteRows = useMemo(
-    () => (showZeroChannelRoutes ? [...routeSummaries, ...zeroChannelPlaceholderRoutes] : routeSummaries),
-    [routeSummaries, showZeroChannelRoutes, zeroChannelPlaceholderRoutes],
+  useEffect(() => {
+    const validGroupIds = new Set(groupRoutes.map((route) => route.id));
+    setExpandedGroupIds((prev) => prev.filter((routeId) => validGroupIds.has(routeId)));
+  }, [groupRoutes]);
+
+  const routeById = useMemo(() => {
+    const map = new Map<number, RouteSummaryRow>();
+    for (const route of routes) map.set(route.id, route);
+    return map;
+  }, [routes]);
+
+  const editingRoute = editingRouteId ? routeById.get(editingRouteId) || null : null;
+  const selectedSourceIdSet = useMemo(() => new Set(form.sourceRouteIds), [form.sourceRouteIds]);
+  const expandedGroupIdSet = useMemo(() => new Set(expandedGroupIds), [expandedGroupIds]);
+  const exactRouteIdSet = useMemo(() => new Set(exactRoutes.map((route) => route.id)), [exactRoutes]);
+  const headerTemplateOptions = useMemo(() => [
+    { value: '', label: '不使用模板', description: '仅使用此分组自定义 Header' },
+    ...headerTemplates.map((template) => ({
+      value: String(template.id),
+      label: template.name,
+      description: template.description || `${countSerializedHeaders(template.headers)} 个 Header`,
+    })),
+  ], [headerTemplates]);
+  const selectedHeaderTemplate = useMemo(
+    () => headerTemplates.find((template) => template.id === form.customHeaderTemplateId) || null,
+    [form.customHeaderTemplateId, headerTemplates],
+  );
+  const activeQuery = (form.autoQuery || form.name).trim();
+  const autoMatchedIds = useMemo(
+    () => exactRoutes
+      .filter((route) => sourceModelMatchesQuery(route.modelPattern, activeQuery))
+      .map((route) => route.id),
+    [activeQuery, exactRoutes],
+  );
+  const switchGroupTargetRoutes = useMemo(
+    () => groupRoutes
+      .filter((route) => !isSwitchGroupRoute(route) && route.id !== editingRouteId)
+      .sort((left, right) => (
+        getSourceTargetLabel(left).localeCompare(getSourceTargetLabel(right), undefined, { sensitivity: 'base' })
+      )),
+    [editingRouteId, groupRoutes],
+  );
+  const switchModelTargetRoutes = exactRoutes;
+  const switchTargetRoutes = useMemo(
+    () => [...switchGroupTargetRoutes, ...switchModelTargetRoutes],
+    [switchGroupTargetRoutes, switchModelTargetRoutes],
+  );
+  const sourceCandidateRoutes = form.mode === 'switch_group' ? switchTargetRoutes : exactRoutes;
+
+  const filteredSourceRoutes = useMemo(
+    () => filterAndSortSourceTargets(sourceCandidateRoutes, sourceSearch, selectedSourceIdSet),
+    [selectedSourceIdSet, sourceCandidateRoutes, sourceSearch],
+  );
+  const filteredSwitchGroupTargetRoutes = useMemo(
+    () => filterAndSortSourceTargets(switchGroupTargetRoutes, sourceSearch, selectedSourceIdSet),
+    [selectedSourceIdSet, sourceSearch, switchGroupTargetRoutes],
+  );
+  const filteredSwitchModelTargetRoutes = useMemo(
+    () => filterAndSortSourceTargets(switchModelTargetRoutes, sourceSearch, selectedSourceIdSet),
+    [selectedSourceIdSet, sourceSearch, switchModelTargetRoutes],
+  );
+  const visibleSourceRoutes = useMemo(
+    () => (form.mode === 'switch_group'
+      ? [...filteredSwitchGroupTargetRoutes, ...filteredSwitchModelTargetRoutes]
+      : filteredSourceRoutes),
+    [filteredSourceRoutes, filteredSwitchGroupTargetRoutes, filteredSwitchModelTargetRoutes, form.mode],
   );
 
-  const canSaveRoute = useMemo(() => {
-    if (saving) return false;
-    if (form.routeMode === 'explicit_group') {
-      return !!form.displayName.trim() && form.sourceRouteIds.length > 0;
-    }
-    return !!form.modelPattern.trim() && !getModelPatternError(form.modelPattern);
-  }, [form.displayName, form.modelPattern, form.routeMode, form.sourceRouteIds.length, saving]);
-
-  const previewModelSamples = useMemo(() => {
-    if (!showManual) return [];
-    const names = new Set<string>();
-    for (const modelName of Object.keys(modelCandidates || {})) {
-      const normalized = modelName.trim();
-      if (normalized) names.add(normalized);
-    }
-    for (const route of routeSummaries) {
-      if (!isRouteExactModel(route)) continue;
-      const normalized = route.modelPattern.trim();
-      if (normalized) names.add(normalized);
-    }
-    return Array.from(names)
-      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
-      .slice(0, 800);
-  }, [showManual, modelCandidates, routeSummaries]);
-
-  const exactSourceRouteOptions = useMemo(
-    () => routeSummaries.filter((route) => isRouteExactModel(route)),
-    [routeSummaries],
+  const filteredGroups = useMemo(() => {
+    const query = normalizeComparable(search);
+    if (!query) return groupRoutes;
+    return groupRoutes.filter((route) => {
+      const sourceText = (route.sourceRouteIds || [])
+        .map((routeId) => routeById.get(routeId)?.modelPattern || '')
+        .join(' ');
+      return [
+        resolveRouteTitle(route),
+        route.modelPattern,
+        route.siteNames.join(' '),
+        sourceText,
+      ].join(' ').toLowerCase().includes(query);
+    });
+  }, [groupRoutes, routeById, search]);
+  const filteredSwitchGroups = useMemo(
+    () => filteredGroups.filter((route) => isSwitchGroupRoute(route)),
+    [filteredGroups],
   );
+  const filteredNormalGroups = useMemo(
+    () => filteredGroups.filter((route) => !isSwitchGroupRoute(route)),
+    [filteredGroups],
+  );
+  const switchGroupCount = groupRoutes.filter((route) => isSwitchGroupRoute(route)).length;
+  const normalGroupCount = groupRoutes.length - switchGroupCount;
+  const showSeparatedGroupSections = switchGroupCount > 0;
 
-  const resetRouteForm = () => {
-    setForm(EMPTY_ROUTE_FORM);
+  const selectedSourceRoutes = useMemo(
+    () => form.sourceRouteIds
+      .map((routeId) => routeById.get(routeId))
+      .filter((route): route is RouteSummaryRow => !!route),
+    [form.sourceRouteIds, routeById],
+  );
+  const selectedSwitchTargetRoutes = useMemo(
+    () => sortSwitchTargetsByKind(selectedSourceRoutes),
+    [selectedSourceRoutes],
+  );
+  const activeTargetRoute = form.activeSourceRouteId ? routeById.get(form.activeSourceRouteId) || null : null;
+
+  const totalMemberRoutes = groupRoutes.reduce((total, route) => total + (route.sourceRouteIds?.length || 0), 0);
+  const totalEnabledGroups = groupRoutes.filter((route) => route.enabled).length;
+
+  const startCreate = () => {
     setEditingRouteId(null);
+    setForm(EMPTY_FORM);
+    setSourceSearch('');
+    setEditorOpen(true);
   };
 
-  const handleAddRoute = async () => {
-    const trimmedDisplayName = form.displayName.trim() ? form.displayName.trim() : undefined;
-    const trimmedDisplayIcon = form.displayIcon.trim() ? form.displayIcon.trim() : undefined;
-    const trimmedModelPattern = form.modelPattern.trim();
-    const routeMode = normalizeRouteMode(form.routeMode);
-    if (routeMode === 'explicit_group') {
-      if (!trimmedDisplayName) {
-        toast.error('请填写对外模型名');
-        return;
-      }
-      if (form.sourceRouteIds.length === 0) {
-        toast.error('请至少选择一个来源模型');
-        return;
-      }
-    } else {
-      if (!trimmedModelPattern) return;
-      const modelPatternError = getModelPatternError(form.modelPattern);
-      if (modelPatternError) {
-        toast.error(modelPatternError);
-        return;
-      }
+  const startEdit = (route: RouteSummaryRow) => {
+    setEditingRouteId(route.id);
+    setForm(buildGroupForm(route));
+    setSourceSearch('');
+    setExpandedGroupIds((prev) => (prev.includes(route.id) ? prev : [...prev, route.id]));
+    setEditorOpen(true);
+  };
+
+  const closeEditor = () => {
+    if (saving) return;
+    setEditorOpen(false);
+    setEditingRouteId(null);
+    setForm(EMPTY_FORM);
+    setSourceSearch('');
+  };
+
+  useEffect(() => {
+    if (!editorOpen) return undefined;
+    if (
+      typeof globalThis.addEventListener !== 'function'
+      || typeof globalThis.removeEventListener !== 'function'
+    ) {
+      return undefined;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || saving) return;
+      setEditorOpen(false);
+      setEditingRouteId(null);
+      setForm(EMPTY_FORM);
+      setSourceSearch('');
+    };
+    globalThis.addEventListener('keydown', handleKeyDown);
+    return () => globalThis.removeEventListener('keydown', handleKeyDown);
+  }, [editorOpen, saving]);
+
+  const updateGroupMode = (mode: GroupForm['mode']) => {
+    setForm((prev) => {
+      if (prev.mode === mode) return prev;
+      const sourceRouteIds = mode === 'explicit_group'
+        ? prev.sourceRouteIds.filter((routeId) => exactRouteIdSet.has(routeId))
+        : prev.sourceRouteIds;
+      const activeSourceRouteId = mode === 'switch_group'
+        ? (prev.activeSourceRouteId && sourceRouteIds.includes(prev.activeSourceRouteId)
+          ? prev.activeSourceRouteId
+          : (sourceRouteIds[0] ?? null))
+        : null;
+      return {
+        ...prev,
+        mode,
+        sourceRouteIds,
+        activeSourceRouteId,
+      };
+    });
+  };
+
+  const toggleGroupExpanded = (routeId: number) => {
+    setExpandedGroupIds((prev) => (
+      prev.includes(routeId)
+        ? prev.filter((id) => id !== routeId)
+        : [...prev, routeId]
+    ));
+  };
+
+  const shouldIgnoreGroupCardClick = (target: EventTarget | null) => {
+    const candidate = target as {
+      closest?: (selector: string) => Element | null;
+      parentElement?: Element | null;
+    } | null;
+    const selector = [
+      'button',
+      'a',
+      'input',
+      'select',
+      'textarea',
+      'label',
+      '[role="button"]',
+      '.model-group-card-actions',
+      '.model-group-detail',
+    ].join(',');
+    const matched = typeof candidate?.closest === 'function'
+      ? candidate.closest(selector)
+      : candidate?.parentElement?.closest(selector);
+    return !!matched;
+  };
+
+  const handleGroupCardClick = (routeId: number, event: ReactMouseEvent<HTMLElement>) => {
+    if (shouldIgnoreGroupCardClick(event.target)) return;
+    toggleGroupExpanded(routeId);
+  };
+
+  const applyAutoMatch = () => {
+    if (!activeQuery) {
+      toast.error('先填写分组模型名或自动匹配关键词');
+      return;
+    }
+    if (autoMatchedIds.length === 0) {
+      toast.error('没有匹配到可加入分组的来源模型');
+      return;
+    }
+    setForm((prev) => ({
+      ...prev,
+      sourceRouteIds: autoMatchedIds,
+      activeSourceRouteId: prev.mode === 'switch_group' ? (autoMatchedIds[0] ?? null) : prev.activeSourceRouteId,
+    }));
+    toast.success(`已匹配 ${autoMatchedIds.length} 个来源模型`);
+  };
+
+  const toggleSourceRoute = (routeId: number) => {
+    setForm((prev) => {
+      const next = new Set(prev.sourceRouteIds);
+      if (next.has(routeId)) next.delete(routeId);
+      else next.add(routeId);
+      const sourceRouteIds = Array.from(next);
+      const activeSourceRouteId = prev.mode === 'switch_group'
+        ? (prev.activeSourceRouteId && sourceRouteIds.includes(prev.activeSourceRouteId)
+          ? prev.activeSourceRouteId
+          : (sourceRouteIds[0] ?? null))
+        : prev.activeSourceRouteId;
+      return {
+        ...prev,
+        sourceRouteIds,
+        activeSourceRouteId,
+      };
+    });
+  };
+
+  const selectSourceRoutes = (routeIds: number[]) => {
+    const normalizedRouteIds = Array.from(new Set(
+      routeIds.filter((routeId) => Number.isFinite(routeId) && routeId > 0),
+    ));
+    if (normalizedRouteIds.length === 0) return;
+    setForm((prev) => {
+      const next = new Set(prev.sourceRouteIds);
+      for (const routeId of normalizedRouteIds) next.add(routeId);
+      const sourceRouteIds = Array.from(next);
+      const activeSourceRouteId = prev.mode === 'switch_group'
+        ? (prev.activeSourceRouteId && sourceRouteIds.includes(prev.activeSourceRouteId)
+          ? prev.activeSourceRouteId
+          : (normalizedRouteIds[0] ?? sourceRouteIds[0] ?? null))
+        : prev.activeSourceRouteId;
+      return {
+        ...prev,
+        sourceRouteIds,
+        activeSourceRouteId,
+      };
+    });
+  };
+
+  const clearSourceRoutes = () => {
+    setForm((prev) => ({
+      ...prev,
+      sourceRouteIds: [],
+      activeSourceRouteId: prev.mode === 'switch_group' ? null : prev.activeSourceRouteId,
+    }));
+  };
+
+  const updateHeaderField = (index: number, patch: Partial<CustomHeaderField>) => {
+    setForm((prev) => ({
+      ...prev,
+      customHeaders: prev.customHeaders.map((field, fieldIndex) => (
+        fieldIndex === index ? { ...field, ...patch } : field
+      )),
+    }));
+  };
+
+  const addHeaderField = () => {
+    setForm((prev) => ({
+      ...prev,
+      customHeaders: [...prev.customHeaders, emptyCustomHeaderField()],
+    }));
+  };
+
+  const removeHeaderField = (index: number) => {
+    setForm((prev) => {
+      const next = prev.customHeaders.filter((_, fieldIndex) => fieldIndex !== index);
+      return {
+        ...prev,
+        customHeaders: next.length > 0 ? next : [emptyCustomHeaderField()],
+      };
+    });
+  };
+
+  const saveGroup = async () => {
+    const name = form.name.trim();
+    if (!name) {
+      toast.error('请填写下游模型名');
+      return;
+    }
+
+    const sourceRouteIds = form.sourceRouteIds.length > 0
+      ? form.sourceRouteIds
+      : autoMatchedIds;
+    if (sourceRouteIds.length === 0) {
+      toast.error(form.mode === 'switch_group' ? '请至少添加一个入口目标' : '请至少添加一个来源模型');
+      return;
+    }
+    const activeSourceRouteId = form.mode === 'switch_group'
+      ? (form.activeSourceRouteId && sourceRouteIds.includes(form.activeSourceRouteId)
+        ? form.activeSourceRouteId
+        : (sourceRouteIds[0] ?? null))
+      : null;
+    if (form.mode === 'switch_group' && !activeSourceRouteId) {
+      toast.error('请选择当前指向的入口目标');
+      return;
+    }
+
+    const serializedHeaders = serializeCustomHeaders(form.customHeaders);
+    if (!serializedHeaders.valid) {
+      toast.error(serializedHeaders.error || 'Header 配置不正确');
+      return;
+    }
+
+    if (editingRouteId) {
+      const targetName = editingRoute ? resolveRouteTitle(editingRoute) : name;
+      const confirmed = globalThis.confirm(
+        `确认保存对模型分组 ${targetName} 的更改吗？保存后会立即影响下游请求选择的供应商。`,
+      );
+      if (!confirmed) return;
     }
 
     setSaving(true);
     try {
+      const payload = {
+        routeMode: form.mode,
+        displayName: name,
+        sourceRouteIds,
+        activeSourceRouteId,
+        routingStrategy: form.routingStrategy,
+        customHeaderTemplateId: form.customHeaderTemplateId,
+        customHeaders: serializedHeaders.customHeaders || null,
+        enabled: form.enabled,
+      };
       if (editingRouteId) {
-        const currentRoute = routeSummaries.find((route) => route.id === editingRouteId) || null;
-        const modelPatternChanged = routeMode === 'pattern' && !!currentRoute && currentRoute.modelPattern !== trimmedModelPattern;
-        await api.updateRoute(editingRouteId, {
-          routeMode,
-          ...(routeMode === 'pattern' ? { modelPattern: trimmedModelPattern } : {}),
-          displayName: trimmedDisplayName,
-          displayIcon: trimmedDisplayIcon,
-          ...(routeMode === 'explicit_group' ? { sourceRouteIds: form.sourceRouteIds } : {}),
-        });
-        toast.success(routeMode === 'pattern' && modelPatternChanged ? tr('群组已更新并重新匹配通道') : tr('群组已更新'));
+        await api.updateRoute(editingRouteId, payload);
+        toast.success('模型分组已更新');
       } else {
-        await api.addRoute({
-          routeMode,
-          ...(routeMode === 'pattern' ? { modelPattern: trimmedModelPattern } : {}),
-          displayName: trimmedDisplayName,
-          displayIcon: trimmedDisplayIcon,
-          ...(routeMode === 'explicit_group' ? { sourceRouteIds: form.sourceRouteIds } : {}),
-        });
-        toast.success(tr('群组已创建'));
+        await api.addRoute(payload);
+        toast.success('模型分组已创建');
       }
-      setShowManual(false);
-      resetRouteForm();
       await load();
-    } catch (e: any) {
-      toast.error(e.message || (editingRouteId ? tr('更新群组失败') : tr('创建群组失败')));
+      setEditingRouteId(null);
+      setForm(EMPTY_FORM);
+      setSourceSearch('');
+      setEditorOpen(false);
+    } catch (error: any) {
+      toast.error(error?.message || '保存模型分组失败');
     } finally {
       setSaving(false);
     }
   };
 
-  const handleEditRoute = (route: RouteSummaryRow) => {
-    loadCandidates();
-    setEditingRouteId(route.id);
-    const routeMode = normalizeRouteMode(route.routeMode);
-    setForm({
-      routeMode,
-      modelPattern: route.modelPattern || '',
-      displayName: route.displayName || '',
-      displayIcon: normalizeRouteDisplayIconValue(route.displayIcon),
-      sourceRouteIds: routeMode === 'explicit_group' ? [...(route.sourceRouteIds || [])] : [],
-      advancedOpen: routeMode === 'pattern',
-    });
-    setShowManual(true);
-  };
-
-  const handleCancelEditRoute = () => {
-    resetRouteForm();
-    setShowManual(false);
-  };
-
-  const handleDeleteRoute = async (routeId: number) => {
+  const deleteGroup = async (route: RouteSummaryRow) => {
+    if (!globalThis.confirm(`确认删除模型分组 ${resolveRouteTitle(route)}？`)) return;
     try {
-      await api.deleteRoute(routeId);
-      toast.success('路由已删除');
+      await api.deleteRoute(route.id);
+      toast.success('模型分组已删除');
+      if (editingRouteId === route.id) {
+        setEditingRouteId(null);
+        setForm(EMPTY_FORM);
+        setEditorOpen(false);
+      }
+      setExpandedGroupIds((prev) => prev.filter((routeId) => routeId !== route.id));
       await load();
-    } catch (e: any) {
-      toast.error(e.message || '删除路由失败');
+    } catch (error: any) {
+      toast.error(error?.message || '删除模型分组失败');
     }
   };
 
-  const handleToggleRouteEnabled = async (route: RouteSummaryRow) => {
-    const newEnabled = !route.enabled;
-    setRouteSummaries((prev) =>
-      prev.map((item) => (item.id === route.id ? { ...item, enabled: newEnabled } : item)),
-    );
-    try {
-      await api.updateRoute(route.id, { enabled: newEnabled });
-      toast.success(newEnabled ? '路由已启用' : '路由已禁用');
-    } catch (e: any) {
-      setRouteSummaries((prev) =>
-        prev.map((item) => (item.id === route.id ? { ...item, enabled: route.enabled } : item)),
-      );
-      toast.error(e.message || '切换路由状态失败');
-    }
-  };
-
-  const handleRoutingStrategyChange = async (route: RouteSummaryRow, routingStrategy: RouteRoutingStrategy) => {
-    const currentStrategy = normalizeRouteRoutingStrategyValue(route.routingStrategy);
-    if (routingStrategy === currentStrategy) return;
-
-    setUpdatingRoutingStrategyByRoute((prev) => ({ ...prev, [route.id]: true }));
-    setRouteSummaries((prev) => prev.map((item) => (
-      item.id === route.id
-        ? { ...item, routingStrategy }
-        : item
+  const toggleGroupEnabled = async (route: RouteSummaryRow) => {
+    const enabled = !route.enabled;
+    setRoutes((prev) => prev.map((item) => (
+      item.id === route.id ? { ...item, enabled } : item
     )));
     try {
-      await api.updateRoute(route.id, { routingStrategy });
-      toast.success(getRouteRoutingStrategySuccessMessage(routingStrategy));
-    } catch (e: any) {
-      setRouteSummaries((prev) => prev.map((item) => (
-        item.id === route.id
-          ? { ...item, routingStrategy: currentStrategy }
-          : item
+      await api.updateRoute(route.id, { enabled });
+      toast.success(enabled ? '模型分组已启用' : '模型分组已停用');
+    } catch (error: any) {
+      setRoutes((prev) => prev.map((item) => (
+        item.id === route.id ? { ...item, enabled: route.enabled } : item
       )));
-      toast.error(e.message || '更新路由策略失败');
-      return;
-    } finally {
-      setUpdatingRoutingStrategyByRoute((prev) => ({ ...prev, [route.id]: false }));
-    }
-
-    try {
-      await load();
-    } catch (e: any) {
-      toast.error(e?.message || '路由策略已保存，但刷新列表失败');
+      toast.error(error?.message || '切换分组状态失败');
     }
   };
 
-  // Stable derived value: only changes when route patterns change (not on enabled toggle)
-  const routePatternsKey = visibleRouteRows.map((r) => `${r.id}:${r.modelPattern}:${r.routeMode || 'pattern'}`).join(',');
-  const routePatterns = useMemo(
-    () => visibleRouteRows.map((r) => ({ id: r.id, modelPattern: r.modelPattern, routeMode: r.routeMode })),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [routePatternsKey],
-  );
-
-  const routeBrandById = useMemo(() => {
-    const next = new Map<number, BrandInfo | null>();
-    for (const route of visibleRouteRows) {
-      next.set(route.id, resolveRouteBrand(route));
+  const updateSwitchGroupActiveTarget = async (route: RouteSummaryRow, nextRouteId: number) => {
+    if (!isSwitchGroupRoute(route)) return;
+    if (!Number.isFinite(nextRouteId) || nextRouteId <= 0) return;
+    const sourceRouteIds = route.sourceRouteIds || [];
+    if (!sourceRouteIds.includes(nextRouteId)) {
+      toast.error('当前目标不在切换分组候选范围内');
+      return;
     }
-    return next;
-  }, [visibleRouteRows]);
+    const previousActiveSourceRouteId = typeof route.activeSourceRouteId === 'number'
+      ? route.activeSourceRouteId
+      : getSwitchGroupActiveSourceRouteId(route.modelMapping);
+    if (previousActiveSourceRouteId === nextRouteId) return;
 
-  const listVisibleRoutes = useMemo(
-    () => buildVisibleRouteList(visibleRouteRows, isExactModelPattern, matchesModelPattern),
-    [visibleRouteRows],
-  );
-
-  const brandList = useMemo(() => {
-    const grouped = new Map<string, { count: number; brand: BrandInfo }>();
-    let otherCount = 0;
-
-    for (const route of listVisibleRoutes) {
-      const brand = routeBrandById.get(route.id) || null;
-      if (!brand) {
-        otherCount++;
-        continue;
-      }
-
-      const existing = grouped.get(brand.name);
-      if (existing) {
-        existing.count++;
-      } else {
-        grouped.set(brand.name, { count: 1, brand });
-      }
+    setQuickSwitchingRouteId(route.id);
+    setRoutes((prev) => prev.map((item) => (
+      item.id === route.id ? { ...item, activeSourceRouteId: nextRouteId } : item
+    )));
+    try {
+      await api.updateRoute(route.id, { activeSourceRouteId: nextRouteId });
+      toast.success('当前指向已更新');
+      await load();
+    } catch (error: any) {
+      setRoutes((prev) => prev.map((item) => (
+        item.id === route.id ? { ...item, activeSourceRouteId: previousActiveSourceRouteId ?? null } : item
+      )));
+      toast.error(error?.message || '更新当前指向失败');
+    } finally {
+      setQuickSwitchingRouteId(null);
     }
+  };
 
-    return {
-      list: [...grouped.entries()].sort((a, b) => {
-        if (a[1].count === b[1].count) return a[0].localeCompare(b[0]);
-        return b[1].count - a[1].count;
-      }) as [string, { count: number; brand: BrandInfo }][],
-      otherCount,
-    };
-  }, [listVisibleRoutes, routeBrandById]);
-
-  const siteList = useMemo(() => {
-    const grouped = new Map<string, { count: number; siteId: number }>();
-
-    for (const route of listVisibleRoutes) {
-      const seenSites = new Set<string>();
-      for (const siteName of route.siteNames || []) {
-        if (!siteName || seenSites.has(siteName)) continue;
-        seenSites.add(siteName);
-
-        const existing = grouped.get(siteName);
-        if (existing) {
-          existing.count++;
-        } else {
-          grouped.set(siteName, { count: 1, siteId: 0 });
-        }
-      }
+  const rebuildSourceModels = async () => {
+    try {
+      setRebuilding(true);
+      const response = await api.rebuildRoutes(true);
+      toast.info(response?.message || '已开始同步供应商模型');
+      await load();
+    } catch (error: any) {
+      toast.error(error?.message || '同步供应商模型失败');
+    } finally {
+      setRebuilding(false);
     }
+  };
 
-    return [...grouped.entries()].sort((a, b) => {
-      if (a[1].count === b[1].count) return a[0].localeCompare(b[0]);
-      return b[1].count - a[1].count;
-    }) as [string, { count: number; siteId: number }][];
-  }, [listVisibleRoutes]);
-
-  const routeEndpointTypesByRouteId = useMemo(() => {
-    const index: Record<number, Set<string>> = {};
-    const entries = Object.entries(endpointTypesByModel || {});
-    for (const route of routePatterns) {
-      const pattern = (route.modelPattern || '').trim();
-      if (!pattern) {
-        index[route.id] = new Set<string>();
-        continue;
-      }
-      const endpointTypes = new Set<string>();
-      for (const [modelName, rawTypes] of entries) {
-        if (!matchesModelPattern(modelName, pattern)) continue;
-        for (const rawType of Array.isArray(rawTypes) ? rawTypes : []) {
-          const endpointType = String(rawType || '').trim();
-          if (!endpointType) continue;
-          endpointTypes.add(endpointType);
-        }
-      }
-      // Fallback: infer from siteNames isn't possible without platform info,
-      // but we'll keep endpoint types from model availability
-      index[route.id] = endpointTypes;
-    }
-    return index;
-  }, [routePatterns, endpointTypesByModel]);
-
-  const endpointTypeList = useMemo(() => {
-    const grouped = new Map<string, number>();
-    for (const route of listVisibleRoutes) {
-      const endpointTypes = routeEndpointTypesByRouteId[route.id] || new Set<string>();
-      for (const endpointType of endpointTypes) {
-        grouped.set(endpointType, (grouped.get(endpointType) || 0) + 1);
-      }
-    }
-    return [...grouped.entries()].sort((a, b) => {
-      if (a[1] === b[1]) return a[0].localeCompare(b[0], undefined, { sensitivity: 'base' });
-      return b[1] - a[1];
-    }) as [string, number][];
-  }, [listVisibleRoutes, routeEndpointTypesByRouteId]);
-
-  const sourceEndpointTypesByRouteId = useMemo(() => {
-    if (!showManual) return {};
-    const next: Record<number, string[]> = {};
-    for (const route of exactSourceRouteOptions) {
-      next[route.id] = Array.from(routeEndpointTypesByRouteId[route.id] || new Set<string>())
-        .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-    }
-    return next;
-  }, [showManual, exactSourceRouteOptions, routeEndpointTypesByRouteId]);
-
-  const routeBrandIconCandidates = useMemo(() => {
-    if (!showManual) return [];
-    const byIcon = new Map<string, BrandInfo>();
-
-    for (const route of visibleRouteRows) {
-      const brand = resolveRouteBrand(route);
-      if (brand) byIcon.set(brand.icon, brand);
-    }
-
-    for (const modelName of Object.keys(modelCandidates || {})) {
-      const brand = getBrand(modelName);
-      if (brand) byIcon.set(brand.icon, brand);
-    }
-
-    return Array.from(byIcon.values())
-      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
-  }, [showManual, visibleRouteRows, modelCandidates]);
-
-  const routeIconSelectOptions = useMemo<RouteIconOption[]>(() => ([
-    ...ROUTE_ICON_OPTIONS,
-    ...routeBrandIconCandidates.map((brand) => ({
-      value: toBrandIconValue(brand.icon),
-      label: brand.name,
-      description: `${brand.name} 品牌图标`,
-      iconNode: <BrandGlyph brand={brand} size={14} fallbackText={brand.name} />,
-    })),
-  ]), [routeBrandIconCandidates]);
-
-  const groupRouteList = useMemo<GroupRouteItem[]>(() => (
-    listVisibleRoutes
-      .filter((route) => !isRouteExactModel(route))
-      .map((route) => ({
-        id: route.id,
-        title: resolveRouteTitle(route),
-        icon: resolveRouteIcon(route),
-        brand: routeBrandById.get(route.id) || null,
-        modelPattern: route.modelPattern,
-        channelCount: route.channelCount,
-        sourceRouteCount: Array.isArray(route.sourceRouteIds) ? route.sourceRouteIds.length : 0,
-      }))
-      .sort((a, b) => {
-        if (a.channelCount === b.channelCount) return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
-        return b.channelCount - a.channelCount;
-      })
-  ), [listVisibleRoutes, routeBrandById]);
-
-  const activeGroupRoute = useMemo(() => {
-    if (typeof activeGroupFilter !== 'number') return null;
-    return listVisibleRoutes.find((route) => route.id === activeGroupFilter) || null;
-  }, [activeGroupFilter, listVisibleRoutes]);
-
-  const sortedRoutes = useMemo(() => (
-    [...listVisibleRoutes].sort((a, b) => {
-      if (sortBy === 'channelCount') {
-        const countCmp = a.channelCount - b.channelCount;
-        if (countCmp !== 0) return sortDir === 'asc' ? countCmp : -countCmp;
-      }
-
-      const nameCmp = a.modelPattern.localeCompare(b.modelPattern, undefined, { sensitivity: 'base' });
-      return sortDir === 'asc' ? nameCmp : -nameCmp;
-    })
-  ), [listVisibleRoutes, sortBy, sortDir]);
-
-  // Shared base filter: all filters EXCEPT enabledFilter
-  const baseFilteredRoutes = useMemo(() => {
-    let list = sortedRoutes;
-
-    if (activeGroupFilter === '__all__') {
-      list = list.filter((route) => !isRouteExactModel(route));
-    } else if (typeof activeGroupFilter === 'number') {
-      list = list.filter((route) => route.id === activeGroupFilter);
-    }
-
-    if (activeBrand) {
-      if (activeBrand === '__other__') {
-        list = list.filter((route) => !(routeBrandById.get(route.id) || null));
-      } else {
-        list = list.filter((route) => (routeBrandById.get(route.id)?.name || '') === activeBrand);
-      }
-    }
-
-    if (activeSite) {
-      list = list.filter((route) => route.siteNames?.includes(activeSite));
-    }
-
-    if (activeEndpointType) {
-      list = list.filter((route) =>
-        (routeEndpointTypesByRouteId[route.id] || new Set<string>()).has(activeEndpointType),
-      );
-    }
-
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      list = list.filter((route) => {
-        const modelPattern = route.modelPattern.toLowerCase();
-        const displayName = (route.displayName || '').toLowerCase();
-        const title = resolveRouteTitle(route).toLowerCase();
-        return modelPattern.includes(q) || displayName.includes(q) || title.includes(q);
-      });
-    }
-
-    return list;
-  }, [sortedRoutes, activeGroupFilter, activeBrand, activeSite, activeEndpointType, search, routeBrandById, routeEndpointTypesByRouteId]);
-
-  const enabledCounts = useMemo(() => {
-    let enabled = 0;
-    let disabled = 0;
-    for (const route of baseFilteredRoutes) {
-      if (route.kind === 'zero_channel' || route.readOnly === true || route.isVirtual === true) continue;
-      if (route.enabled) enabled++;
-      else disabled++;
-    }
-    return { enabled, disabled };
-  }, [baseFilteredRoutes]);
-
-  const filteredRoutes = useMemo(() => {
-    if (enabledFilter === 'all') return baseFilteredRoutes;
-    return baseFilteredRoutes.filter((route) => {
-      if (route.kind === 'zero_channel' || route.readOnly === true || route.isVirtual === true) return false;
-      return enabledFilter === 'enabled' ? route.enabled : !route.enabled;
-    });
-  }, [baseFilteredRoutes, enabledFilter]);
-
-  const selectableRouteIds = useMemo(() => {
-    return new Set(
-      filteredRoutes
-        .filter((route) => route.kind !== 'zero_channel' && route.readOnly !== true && route.isVirtual !== true)
-        .map((route) => route.id),
+  const canSave = !!form.name.trim()
+    && (form.sourceRouteIds.length > 0 || autoMatchedIds.length > 0)
+    && (form.mode !== 'switch_group' || !!form.activeSourceRouteId || form.sourceRouteIds.length === 0)
+    && !saving;
+  const allVisibleSourcesSelected = visibleSourceRoutes.length > 0
+    && visibleSourceRoutes.every((route) => selectedSourceIdSet.has(route.id));
+  const selectedSwitchGroupTargetCount = countSelectedSourceTargets(switchGroupTargetRoutes, selectedSourceIdSet);
+  const selectedSwitchModelTargetCount = countSelectedSourceTargets(switchModelTargetRoutes, selectedSourceIdSet);
+  const allVisibleSwitchGroupTargetsSelected = filteredSwitchGroupTargetRoutes.length > 0
+    && filteredSwitchGroupTargetRoutes.every((route) => selectedSourceIdSet.has(route.id));
+  const allVisibleSwitchModelTargetsSelected = filteredSwitchModelTargetRoutes.length > 0
+    && filteredSwitchModelTargetRoutes.every((route) => selectedSourceIdSet.has(route.id));
+  const renderSourceRow = (route: RouteSummaryRow) => {
+    const checked = selectedSourceIdSet.has(route.id);
+    const autoMatched = autoMatchedIds.includes(route.id);
+    const active = form.mode === 'switch_group' && form.activeSourceRouteId === route.id;
+    return (
+      <label key={route.id} className={`model-group-source-row ${checked ? 'is-selected' : ''}`.trim()}>
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={() => toggleSourceRoute(route.id)}
+        />
+        <span className="model-group-source-icon">
+          <ModelGlyph model={route.modelPattern} size={18} />
+        </span>
+        <span className="model-group-source-copy">
+          <span className="model-group-source-name">{getSourceTargetLabel(route)}</span>
+          <span className="model-group-source-meta">
+            {getSourceTargetTypeLabel(route)}
+            <span aria-hidden="true"> / </span>
+            {formatCount(route.enabledChannelCount, '可用通道')}
+            {route.siteNames.length > 0 ? ` / ${route.siteNames.slice(0, 3).join('、')}` : ''}
+          </span>
+        </span>
+        {active && <span className="model-group-active-badge">当前</span>}
+        {autoMatched && <span className="model-group-auto-badge">匹配</span>}
+      </label>
     );
-  }, [filteredRoutes]);
-
-  const toggleBatchSelectMode = () => {
-    setBatchSelectMode((prev) => {
-      if (prev) setSelectedRouteIds(new Set());
-      return !prev;
-    });
   };
-
-  const toggleRouteSelection = (routeId: number) => {
-    setSelectedRouteIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(routeId)) next.delete(routeId);
-      else next.add(routeId);
-      return next;
-    });
-  };
-
-  const selectAllRoutes = () => {
-    setSelectedRouteIds(new Set(selectableRouteIds));
-  };
-
-  const deselectAllRoutes = () => {
-    setSelectedRouteIds(new Set());
-  };
-
-  const handleBatchUpdateRoutes = async (action: 'enable' | 'disable') => {
-    const ids = Array.from(selectedRouteIds).filter((id) => selectableRouteIds.has(id));
-    if (ids.length === 0) {
-      toast.info('请先选择要操作的路由');
-      return;
-    }
-    const actionLabel = action === 'disable' ? '禁用' : '启用';
-    const confirmed = window.confirm(`确认批量${actionLabel} ${ids.length} 条路由？`);
-    if (!confirmed) return;
-
-    setBatchUpdatingRoutes(true);
-    try {
-      await api.batchUpdateRoutes({ ids, action });
-      toast.success(`已批量${actionLabel} ${ids.length} 条路由`);
-      setSelectedRouteIds(new Set());
-      setBatchSelectMode(false);
-      await load();
-    } catch (e: any) {
-      toast.error(e.message || `批量${actionLabel}路由失败`);
-    } finally {
-      setBatchUpdatingRoutes(false);
-    }
-  };
-
-  useEffect(() => {
-    setVisibleRouteCount(getInitialVisibleCount(filteredRoutes.length, ROUTE_RENDER_CHUNK));
-  }, [filteredRoutes.length]);
-
-  const handleLoadMoreRoutes = useCallback(() => {
-    setVisibleRouteCount((current) => getNextVisibleCount(current, filteredRoutes.length, ROUTE_RENDER_CHUNK));
-  }, [filteredRoutes.length]);
-
-  const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
-
-  const shouldShowLoadMore = filteredRoutes.length > 0 && visibleRouteCount < filteredRoutes.length;
-
-  useEffect(() => {
-    const el = loadMoreSentinelRef.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(
-      (entries) => { if (entries[0]?.isIntersecting) handleLoadMoreRoutes(); },
-      { rootMargin: '200px' },
+  const renderGroupCard = (route: RouteSummaryRow) => {
+    const title = resolveRouteTitle(route);
+    const brand = resolveRouteBrand(route);
+    const memberRoutes = (route.sourceRouteIds || [])
+      .map((routeId) => routeById.get(routeId))
+      .filter((item): item is RouteSummaryRow => !!item);
+    const switchGroup = isSwitchGroupRoute(route);
+    const quickSwitchTargetRoutes = switchGroup ? sortSwitchTargetsByKind(memberRoutes) : memberRoutes;
+    const activeSourceRouteId = switchGroup
+      ? (typeof route.activeSourceRouteId === 'number'
+        ? route.activeSourceRouteId
+        : getSwitchGroupActiveSourceRouteId(route.modelMapping))
+      : null;
+    const activeMember = activeSourceRouteId ? routeById.get(activeSourceRouteId) || null : null;
+    const selected = route.id === editingRouteId;
+    const expanded = expandedGroupIdSet.has(route.id);
+    const customHeaderCount = countSerializedHeaders(route.customHeaders);
+    const hasHeaderConfig = !!route.customHeaderTemplateId || customHeaderCount > 0;
+    return (
+      <article
+        key={route.id}
+        className={`model-group-card ${selected ? 'is-selected' : ''} ${expanded ? 'is-expanded' : ''} ${route.enabled ? '' : 'is-disabled'}`.trim()}
+        onClick={(event) => handleGroupCardClick(route.id, event)}
+      >
+        <button
+          type="button"
+          className="model-group-card-main"
+          onClick={() => toggleGroupExpanded(route.id)}
+          aria-expanded={expanded}
+          aria-controls={`model-group-detail-${route.id}`}
+        >
+          <span className="model-group-avatar">
+            <BrandGlyph brand={brand} model={title} size={24} fallbackText={title} />
+          </span>
+          <span className="model-group-card-copy">
+            <span className="model-group-card-title">{title}</span>
+            <span className="model-group-card-meta">
+              <span className={`model-group-type-badge ${switchGroup ? 'is-switch' : ''}`.trim()}>
+                {getGroupModeLabel(route)}
+              </span>
+              <span aria-hidden="true">/</span>
+              {getRouteRoutingStrategyLabel(route.routingStrategy)}
+              <span aria-hidden="true">/</span>
+              {formatCount(memberRoutes.length, switchGroup ? '目标' : '成员')}
+              <span aria-hidden="true">/</span>
+              {formatCount(route.enabledChannelCount, '可用通道')}
+              {switchGroup && activeMember && (
+                <>
+                  <span aria-hidden="true">/</span>
+                  指向 {getSourceTargetLabel(activeMember)}
+                </>
+              )}
+              {hasHeaderConfig && (
+                <>
+                  <span aria-hidden="true">/</span>
+                  Header
+                </>
+              )}
+            </span>
+          </span>
+          <span className="model-group-expand-indicator" aria-hidden="true" />
+        </button>
+        <div className="model-group-card-members">
+          {switchGroup ? (
+            activeMember ? (
+              <span className="model-group-member-chip is-active">
+                <ModelGlyph model={activeMember.modelPattern} size={14} />
+                当前：{getSourceTargetLabel(activeMember)}
+              </span>
+            ) : (
+              <span className="model-group-member-chip is-muted">未选择当前目标</span>
+            )
+          ) : (
+            <>
+              {memberRoutes.slice(0, 4).map((member) => (
+                <span
+                  key={member.id}
+                  className={`model-group-member-chip ${member.id === activeSourceRouteId ? 'is-active' : ''}`.trim()}
+                >
+                  <ModelGlyph model={member.modelPattern} size={14} />
+                  {getSourceTargetLabel(member)}
+                </span>
+              ))}
+              {memberRoutes.length > 4 && (
+                <span className="model-group-member-chip is-muted">+{memberRoutes.length - 4}</span>
+              )}
+            </>
+          )}
+        </div>
+        {expanded && (
+          <div className={`model-group-detail ${switchGroup ? 'is-switch-quick' : ''}`.trim()} id={`model-group-detail-${route.id}`}>
+            {switchGroup ? (
+              <>
+                <div className="model-group-detail-header">
+                  <span>当前使用</span>
+                  <span>{formatCount(memberRoutes.length, '候选')}</span>
+                </div>
+                {activeMember ? (
+                  <div className="model-group-current-target">
+                    <span className="model-group-source-icon">
+                      <ModelGlyph model={activeMember.modelPattern} size={18} />
+                    </span>
+                    <span className="model-group-detail-copy">
+                      <span className="model-group-detail-model">{getSourceTargetLabel(activeMember)}</span>
+                      <span className="model-group-detail-meta">
+                        {getSourceTargetTypeLabel(activeMember)}
+                        <span aria-hidden="true"> / </span>
+                        {formatCount(activeMember.enabledChannelCount, '可用通道')}
+                      </span>
+                    </span>
+                    <span className="model-group-detail-suppliers" aria-label="供应商">
+                      {getSupplierStatuses(activeMember).length === 0 ? (
+                        <span className="model-group-supplier-chip is-muted">未绑定供应商</span>
+                      ) : getSupplierStatuses(activeMember).map((supplier) => (
+                        <span
+                          key={supplier.key}
+                          className={`model-group-supplier-chip ${supplier.status === 'disabled' ? 'is-disabled' : ''}`.trim()}
+                          title={supplier.status === 'disabled' ? `${supplier.name} 已禁用` : supplier.name}
+                        >
+                          {supplier.name}
+                        </span>
+                      ))}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="model-group-detail-empty">当前没有可用目标</div>
+                )}
+                <div className="model-group-quick-switch">
+                  <FieldLabel>快速切换</FieldLabel>
+                  <ModernSelect
+                    data-testid={`model-group-quick-switch-${route.id}`}
+                    value={activeSourceRouteId ? String(activeSourceRouteId) : ''}
+                    onChange={(value) => void updateSwitchGroupActiveTarget(route, Number(value))}
+                    options={quickSwitchTargetRoutes.map((member) => ({
+                      value: String(member.id),
+                      label: getSourceTargetLabel(member),
+                      description: getSourceTargetDescription(member),
+                      iconNode: getSourceTargetTypePill(member),
+                    }))}
+                    placeholder="选择新的当前目标"
+                    disabled={quickSwitchingRouteId === route.id || memberRoutes.length === 0}
+                    searchable
+                    searchPlaceholder="搜索候选目标"
+                    emptyLabel="暂无候选目标"
+                    size="sm"
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="model-group-detail-header">
+                  <span>成员明细</span>
+                  <span>{formatCount(memberRoutes.length, '模型')}</span>
+                </div>
+                <div className="model-group-detail-list">
+                  {memberRoutes.length === 0 ? (
+                    <div className="model-group-detail-empty">暂无成员模型</div>
+                  ) : memberRoutes.map((member) => {
+                    const suppliers = getSupplierStatuses(member);
+                    return (
+                      <div key={member.id} className="model-group-detail-row">
+                        <span className="model-group-source-icon">
+                          <ModelGlyph model={member.modelPattern} size={18} />
+                        </span>
+                        <span className="model-group-detail-copy">
+                          <span className="model-group-detail-model">{getSourceTargetLabel(member)}</span>
+                          <span className="model-group-detail-meta">
+                            {getSourceTargetTypeLabel(member)}
+                            <span aria-hidden="true"> / </span>
+                            {formatCount(member.enabledChannelCount, '可用通道')}
+                          </span>
+                        </span>
+                        <span className="model-group-detail-suppliers" aria-label="供应商">
+                          {suppliers.length === 0 ? (
+                            <span className="model-group-supplier-chip is-muted">未绑定供应商</span>
+                          ) : suppliers.map((supplier) => (
+                            <span
+                              key={supplier.key}
+                              className={`model-group-supplier-chip ${supplier.status === 'disabled' ? 'is-disabled' : ''}`.trim()}
+                              title={supplier.status === 'disabled' ? `${supplier.name} 已禁用` : supplier.name}
+                            >
+                              {supplier.name}
+                            </span>
+                          ))}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+        <div className="model-group-card-actions">
+          <button
+            type="button"
+            className={`route-enable-toggle model-group-status-toggle ${route.enabled ? 'is-enabled' : 'is-disabled'}`}
+            onClick={() => toggleGroupEnabled(route)}
+          >
+            {route.enabled ? '启用' : '停用'}
+          </button>
+          <button type="button" className="btn-link" onClick={() => startEdit(route)}>编辑</button>
+          <button type="button" className="btn-link btn-link-danger" onClick={() => deleteGroup(route)}>删除</button>
+        </div>
+      </article>
     );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [handleLoadMoreRoutes, shouldShowLoadMore]);
-
-  const visibleRoutes = useMemo(
-    () => filteredRoutes.slice(0, visibleRouteCount),
-    [filteredRoutes, visibleRouteCount],
-  );
-
-  // Lazy per-route candidate index — only computes for routes actually accessed
-  const candidateIndexCacheRef = useRef<{ key: string; cache: Map<number, RouteCandidateView> }>({ key: '', cache: new Map() });
-  const candidateIndexCacheKey = `${routePatternsKey}|${Object.keys(modelCandidates).length}|${candidatesVersionRef.current}`;
-  if (candidateIndexCacheRef.current.key !== candidateIndexCacheKey) {
-    candidateIndexCacheRef.current = { key: candidateIndexCacheKey, cache: new Map() };
-  }
-
-  const getRouteCandidateView = (routeId: number): RouteCandidateView => {
-    const cache = candidateIndexCacheRef.current.cache;
-    const cached = cache.get(routeId);
-    if (cached) return cached;
-    const route = routePatterns.find((r) => r.id === routeId);
-    if (!route) return EMPTY_ROUTE_CANDIDATE_VIEW;
-    const index = buildRouteModelCandidatesIndex([route], modelCandidates, matchesModelPattern);
-    const view = index[routeId] || EMPTY_ROUTE_CANDIDATE_VIEW;
-    cache.set(routeId, view);
-    return view;
-  };
-
-  // Lazy per-route missing token index
-  const missingTokenCacheRef = useRef<{ key: string; cache: Map<number, RouteMissingTokenHint[]> }>({ key: '', cache: new Map() });
-  const missingTokenCacheKey = `${routePatternsKey}|${Object.keys(missingTokenModelsByName).length}|${candidatesVersionRef.current}`;
-  if (missingTokenCacheRef.current.key !== missingTokenCacheKey) {
-    missingTokenCacheRef.current = { key: missingTokenCacheKey, cache: new Map() };
-  }
-
-  const getRouteMissingTokenHints = (routeId: number): RouteMissingTokenHint[] => {
-    const cache = missingTokenCacheRef.current.cache;
-    const cached = cache.get(routeId);
-    if (cached) return cached;
-    const route = routePatterns.find((r) => r.id === routeId);
-    if (!route) return [];
-    const index = buildRouteMissingTokenIndex([route], missingTokenModelsByName, matchesModelPattern);
-    const hints = index[routeId] || [];
-    cache.set(routeId, hints);
-    return hints;
-  };
-
-  const missingTokenSiteItemsCacheRef = useRef<{ key: string; cache: Map<number, MissingTokenRouteSiteActionItem[]> }>({
-    key: '',
-    cache: new Map(),
-  });
-  if (missingTokenSiteItemsCacheRef.current.key !== missingTokenCacheKey) {
-    missingTokenSiteItemsCacheRef.current = { key: missingTokenCacheKey, cache: new Map() };
-  }
-
-  // Lazy per-route missing token group index
-  const missingTokenGroupCacheRef = useRef<{ key: string; cache: Map<number, RouteMissingTokenHint[]> }>({ key: '', cache: new Map() });
-  const missingTokenGroupCacheKey = `${routePatternsKey}|${Object.keys(missingTokenGroupModelsByName).length}|${candidatesVersionRef.current}`;
-  if (missingTokenGroupCacheRef.current.key !== missingTokenGroupCacheKey) {
-    missingTokenGroupCacheRef.current = { key: missingTokenGroupCacheKey, cache: new Map() };
-  }
-
-  const getRouteMissingTokenGroupHints = (routeId: number): RouteMissingTokenHint[] => {
-    const cache = missingTokenGroupCacheRef.current.cache;
-    const cached = cache.get(routeId);
-    if (cached) return cached;
-    const route = routePatterns.find((r) => r.id === routeId);
-    if (!route) return [];
-    const index = buildRouteMissingTokenIndex([route], missingTokenGroupModelsByName, matchesModelPattern);
-    const hints = index[routeId] || [];
-    cache.set(routeId, hints);
-    return hints;
-  };
-
-  const missingTokenGroupItemsCacheRef = useRef<{ key: string; cache: Map<number, MissingTokenGroupRouteSiteActionItem[]> }>({
-    key: '',
-    cache: new Map(),
-  });
-  if (missingTokenGroupItemsCacheRef.current.key !== missingTokenGroupCacheKey) {
-    missingTokenGroupItemsCacheRef.current = { key: missingTokenGroupCacheKey, cache: new Map() };
-  }
-
-  const routeById = useMemo(
-    () => new Map(visibleRouteRows.map((route) => [route.id, route])),
-    [visibleRouteRows],
-  );
-
-  const handleCreateTokenForMissingAccount = (accountId: number, modelName: string) => {
-    if (!Number.isFinite(accountId) || accountId <= 0) return;
-    const params = new URLSearchParams();
-    params.set('create', '1');
-    params.set('accountId', String(accountId));
-    params.set('model', modelName);
-    params.set('from', 'routes');
-    navigate(`/tokens?${params.toString()}`);
-  };
-
-  const handleDeleteChannel = async (channelId: number, routeId: number) => {
-    const dismissedKey = 'metapi:channel-delete-warning-dismissed';
-    const dismissed = localStorage.getItem(dismissedKey) === 'true';
-    if (!dismissed) {
-      const dontAskAgain = { checked: false };
-      const confirmed = await new Promise<boolean>((resolve) => {
-        const overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center';
-        const dialog = document.createElement('div');
-        dialog.style.cssText = 'background:var(--color-bg-card,#fff);border-radius:12px;padding:24px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)';
-        dialog.innerHTML = `
-          <div style="font-weight:600;font-size:15px;margin-bottom:12px">确认移除通道</div>
-          <div style="font-size:13px;color:var(--color-text-secondary);line-height:1.6;margin-bottom:16px">
-            移除的通道会在定时模型刷新时被自动重建恢复。<br/>如果只是想临时停用通道，建议使用<b>禁用开关</b>。
-          </div>
-          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--color-text-muted);margin-bottom:16px;cursor:pointer">
-            <input type="checkbox" id="__ch_del_dismiss" /> 以后不再提示
-          </label>
-          <div style="display:flex;justify-content:flex-end;gap:8px">
-            <button id="__ch_del_cancel" class="btn btn-ghost" style="padding:6px 16px">取消</button>
-            <button id="__ch_del_confirm" class="btn btn-danger" style="padding:6px 16px">确认移除</button>
-          </div>
-        `;
-        overlay.appendChild(dialog);
-        document.body.appendChild(overlay);
-        dialog.querySelector('#__ch_del_cancel')!.addEventListener('click', () => { document.body.removeChild(overlay); resolve(false); });
-        dialog.querySelector('#__ch_del_confirm')!.addEventListener('click', () => {
-          dontAskAgain.checked = (dialog.querySelector('#__ch_del_dismiss') as HTMLInputElement).checked;
-          document.body.removeChild(overlay);
-          resolve(true);
-        });
-        overlay.addEventListener('click', (e) => { if (e.target === overlay) { document.body.removeChild(overlay); resolve(false); } });
-      });
-      if (!confirmed) return;
-      if (dontAskAgain.checked) localStorage.setItem(dismissedKey, 'true');
-    }
-    try {
-      await api.deleteChannel(channelId);
-      toast.success('通道已移除');
-      await loadChannels(routeId, true);
-      setRouteSummaries((prev) =>
-        prev.map((r) => r.id === routeId ? { ...r, channelCount: Math.max(0, r.channelCount - 1) } : r),
-      );
-    } catch (e: any) {
-      toast.error(e.message || '移除通道失败');
-    }
-  };
-
-  const handleToggleChannelEnabled = async (channelId: number, routeId: number, enabled: boolean) => {
-    if (updatingChannel[channelId]) return;
-    setUpdatingChannel((prev) => ({ ...prev, [channelId]: true }));
-    try {
-      await api.updateChannel(channelId, { enabled });
-      toast.success(enabled ? '通道已启用' : '通道已禁用');
-      await loadChannels(routeId, true);
-    } catch (e: any) {
-      toast.error(e.message || '更新通道状态失败');
-    } finally {
-      setUpdatingChannel((prev) => ({ ...prev, [channelId]: false }));
-    }
-  };
-
-  const handleChannelTokenSave = async (routeId: number, channelId: number, accountId: number) => {
-    const tokenId = channelTokenDraft[channelId];
-    const tokenOptions = getRouteCandidateView(routeId).tokenOptionsByAccountId[accountId] || [];
-
-    if (tokenId && tokenOptions.length > 0 && !tokenOptions.some((token) => token.id === tokenId)) {
-      toast.error('该令牌不支持当前模型');
-      return;
-    }
-
-    setUpdatingChannel((prev) => ({ ...prev, [channelId]: true }));
-    try {
-      await api.updateChannel(channelId, { tokenId: tokenId || null });
-      toast.success('通道令牌已更新');
-      await loadChannels(routeId, true);
-    } catch (e: any) {
-      toast.error(e.message || '更新令牌失败');
-    } finally {
-      setUpdatingChannel((prev) => ({ ...prev, [channelId]: false }));
-    }
-  };
-
-  const handleChannelDragEnd = async (routeId: number, event: DragEndEvent) => {
-    if (savingPriorityByRoute[routeId]) return;
-
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-
-    const route = routeSummaries.find((item) => item.id === routeId);
-    if (!route) return;
-
-    const channels = channelsByRouteId[routeId] || [];
-    const activeChannel = channels.find((channel) => channel.id === Number(active.id));
-    if (!activeChannel) return;
-
-    const overIsNewLayer = isPriorityRailNewLayerId(over.id);
-    const targetChannel = overIsNewLayer
-      ? null
-      : channels.find((channel) => channel.id === Number(over.id));
-
-    if (!overIsNewLayer && !targetChannel) return;
-    if (!overIsNewLayer && (targetChannel?.priority ?? 0) === (activeChannel.priority ?? 0)) return;
-
-    const reordered = applyPriorityRailDrop(channels, Number(active.id), over.id);
-    const changedChannels = reordered.filter((channel) => {
-      const previous = channels.find((item) => item.id === channel.id);
-      return (previous?.priority ?? 0) !== channel.priority;
-    });
-
-    if (changedChannels.length === 0) return;
-
-    if (isExplicitGroupRoute(route)) {
-      const changedSourceRouteIds = Array.from(new Set(
-        changedChannels
-          .map((channel) => channel.routeId)
-          .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0),
-      ));
-      if (changedSourceRouteIds.length > 0) {
-        const affectedGroups = routeSummaries.filter((candidate) => (
-          candidate.id !== route.id
-          && isExplicitGroupRoute(candidate)
-          && (candidate.sourceRouteIds || []).some((sourceRouteId) => changedSourceRouteIds.includes(sourceRouteId))
-        ));
-        if (affectedGroups.length > 0) {
-          const affectedNames = affectedGroups.map((candidate) => resolveRouteTitle(candidate));
-          const confirmFn = typeof globalThis.confirm === 'function' ? globalThis.confirm : null;
-          const confirmed = !confirmFn
-            || confirmFn(`当前群组的优先级桶会直接回写来源通道，并同步影响：${affectedNames.join('、')}。是否继续？`);
-          if (!confirmed) return;
-        }
-      }
-    }
-
-    const previousChannels = channels.map((channel) => ({ ...channel }));
-
-    setChannels(routeId, reordered);
-    setSavingPriorityByRoute((prev) => ({ ...prev, [routeId]: true }));
-
-    try {
-      await api.batchUpdateChannels(
-        reordered.map((channel) => ({
-          id: channel.id,
-          priority: channel.priority,
-        })),
-      );
-
-      if (route && isRouteExactModel(route)) {
-        try {
-          const res = await api.getRouteDecision(route.modelPattern);
-          setDecisionByRoute((prev) => ({
-            ...prev,
-            [routeId]: (res?.decision || null) as RouteDecision | null,
-          }));
-        } catch {
-          // ignore route decision refresh failures after reorder
-        }
-      }
-    } catch (e: any) {
-      setChannels(routeId, previousChannels);
-      toast.error(e.message || '保存通道优先级失败，已回滚');
-    } finally {
-      setSavingPriorityByRoute((prev) => ({ ...prev, [routeId]: false }));
-    }
-  };
-
-  const handleSiteBlockModel = async (channelId: number, routeId: number) => {
-    const channels = channelsByRouteId[routeId] || [];
-    const channel = channels.find((c) => c.id === channelId);
-    if (!channel?.site?.id) {
-      toast.error('找不到通道对应的站点信息');
-      return;
-    }
-    const route = routeSummaries.find((r) => r.id === routeId);
-    const modelName = channel.sourceModel || (route && isExactModelPattern(route.modelPattern) ? route.modelPattern : '') || '';
-    if (!modelName) {
-      toast.error('该通道没有精确模型名，无法使用站点屏蔽（通配符路由请在站点编辑中手动禁用）');
-      return;
-    }
-    const siteName = channel.site.name || '未知站点';
-    const confirmed = await new Promise<boolean>((resolve) => {
-      const overlay = document.createElement('div');
-      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center';
-      const dialog = document.createElement('div');
-      dialog.style.cssText = 'background:var(--color-bg-card,#fff);border-radius:12px;padding:24px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)';
-      dialog.innerHTML = `
-        <div style="font-weight:600;font-size:15px;margin-bottom:12px">确认站点屏蔽</div>
-        <div style="font-size:13px;color:var(--color-text-secondary);line-height:1.6;margin-bottom:16px">
-          将模型「<b>${escapeHtml(modelName)}</b>」加入站点「<b>${escapeHtml(siteName)}</b>」的禁用列表。<br/>执行后将自动触发路由重建，该站点下此模型的通道将不再生成。
-        </div>
-        <div style="display:flex;justify-content:flex-end;gap:8px">
-          <button id="__sb_cancel" class="btn btn-ghost" style="padding:6px 16px">取消</button>
-          <button id="__sb_confirm" class="btn btn-warning" style="padding:6px 16px">确认屏蔽</button>
-        </div>
-      `;
-      overlay.appendChild(dialog);
-      document.body.appendChild(overlay);
-      dialog.querySelector('#__sb_cancel')!.addEventListener('click', () => { document.body.removeChild(overlay); resolve(false); });
-      dialog.querySelector('#__sb_confirm')!.addEventListener('click', () => { document.body.removeChild(overlay); resolve(true); });
-      overlay.addEventListener('click', (e) => { if (e.target === overlay) { document.body.removeChild(overlay); resolve(false); } });
-    });
-    if (!confirmed) return;
-
-    try {
-      const siteId = channel.site.id;
-      const existing = await api.getSiteDisabledModels(siteId);
-      const currentModels: string[] = existing?.models || [];
-      if (currentModels.includes(modelName)) {
-        toast.info(`模型「${modelName}」已在站点「${siteName}」的禁用列表中`);
-        return;
-      }
-      await api.updateSiteDisabledModels(siteId, [...currentModels, modelName]);
-      toast.success(`已将「${modelName}」加入站点「${siteName}」的禁用列表，正在重建路由...`);
-      await api.rebuildRoutes(false);
-      invalidateChannels();
-      await load();
-    } catch (e: any) {
-      toast.error(e.message || '站点屏蔽模型失败');
-    }
-  };
-
-  const handleClearRouteCooldown = async (routeId: number) => {
-    if (clearingCooldownByRoute[routeId]) return;
-    setClearingCooldownByRoute((prev) => ({ ...prev, [routeId]: true }));
-    try {
-      await api.clearRouteCooldown(routeId);
-      toast.success('路由冷却已清除');
-
-      try {
-        await loadChannels(routeId, true);
-        const route = routeSummaries.find((item) => item.id === routeId);
-        if (route) {
-          if (isRouteExactModel(route)) {
-            const res = await api.getRouteDecision(route.modelPattern);
-            setDecisionByRoute((prev) => ({
-              ...prev,
-              [routeId]: (res?.decision || null) as RouteDecision | null,
-            }));
-          } else {
-            const res = await api.getRouteWideDecisionsBatch([routeId]);
-            setDecisionByRoute((prev) => ({
-              ...prev,
-              [routeId]: (res?.decisions?.[String(routeId)] || null) as RouteDecision | null,
-            }));
-          }
-        }
-      } catch {
-        toast.error('已清除，但刷新失败');
-      }
-    } catch (e: any) {
-      toast.error(e.message || '清除路由冷却失败');
-    } finally {
-      setClearingCooldownByRoute((prev) => ({ ...prev, [routeId]: false }));
-    }
-  };
-
-  const toggleExpand = async (routeId: number) => {
-    const isCurrentlyExpanded = expandedRouteIds.includes(routeId);
-    if (isCurrentlyExpanded) {
-      if (!isMobile) {
-        const reduceMotion = prefersReducedMotion();
-        if (reduceMotion) {
-          setClosingDesktopDetailRouteIds((prev) => prev.filter((id) => id !== routeId));
-        } else {
-          setClosingDesktopDetailRouteIds((prev) => (prev.includes(routeId) ? prev : [...prev, routeId]));
-          const existingTimer = desktopDetailCloseTimersRef.current[routeId];
-          if (existingTimer) {
-            globalThis.clearTimeout(existingTimer);
-          }
-          desktopDetailCloseTimersRef.current[routeId] = globalThis.setTimeout(() => {
-            setClosingDesktopDetailRouteIds((prev) => prev.filter((id) => id !== routeId));
-            delete desktopDetailCloseTimersRef.current[routeId];
-          }, DESKTOP_DETAIL_COLLAPSE_MS);
-        }
-      }
-      setExpandedRouteIds((prev) => prev.filter((id) => id !== routeId));
-    } else {
-      const existingTimer = desktopDetailCloseTimersRef.current[routeId];
-      if (existingTimer) {
-        globalThis.clearTimeout(existingTimer);
-        delete desktopDetailCloseTimersRef.current[routeId];
-      }
-      setClosingDesktopDetailRouteIds((prev) => prev.filter((id) => id !== routeId));
-      loadCandidates();
-      setExpandedRouteIds((prev) => [...prev, routeId]);
-      // Load channels on demand
-      const route = routeById.get(routeId) || null;
-      const isReadOnlyRoute = route?.kind === 'zero_channel' || route?.readOnly === true || route?.isVirtual === true;
-      if (!channelsByRouteId[routeId] && !isReadOnlyRoute) {
-        try {
-          await loadChannels(routeId);
-        } catch {
-          toast.error('加载通道失败');
-        }
-      }
-    }
-  };
-
-  useEffect(() => () => {
-    Object.values(desktopDetailCloseTimersRef.current).forEach((timerId) => {
-      globalThis.clearTimeout(timerId);
-    });
-    desktopDetailCloseTimersRef.current = {};
-  }, []);
-
-  const getMissingTokenSiteItems = (routeId: number): MissingTokenRouteSiteActionItem[] => {
-    const cached = missingTokenSiteItemsCacheRef.current.cache.get(routeId);
-    if (cached) return cached;
-    const missingTokenHints = getRouteMissingTokenHints(routeId);
-    if (missingTokenHints.length === 0) return EMPTY_MISSING_ITEMS;
-    const siteMap = new Map<string, MissingTokenRouteSiteActionItem>();
-    for (const hint of missingTokenHints) {
-      for (const account of hint.accounts) {
-        if (!Number.isFinite(account.accountId) || account.accountId <= 0) continue;
-        const siteName = (account.siteName || '').trim() || `site-${account.siteId || 'unknown'}`;
-        const key = `${account.siteId || 0}::${siteName.toLowerCase()}`;
-        const accountLabel = account.username || `account-${account.accountId}`;
-        const existing = siteMap.get(key);
-        if (!existing) {
-          siteMap.set(key, { key, siteName, accountId: account.accountId, accountLabel });
-          continue;
-        }
-        if (account.accountId < existing.accountId) {
-          existing.accountId = account.accountId;
-          existing.accountLabel = accountLabel;
-        }
-      }
-    }
-    const items = Array.from(siteMap.values()).sort((a, b) => (
-      a.siteName.localeCompare(b.siteName, undefined, { sensitivity: 'base' })
-    ));
-    missingTokenSiteItemsCacheRef.current.cache.set(routeId, items);
-    return items;
-  };
-
-  const getMissingTokenGroupItems = (routeId: number): MissingTokenGroupRouteSiteActionItem[] => {
-    const cached = missingTokenGroupItemsCacheRef.current.cache.get(routeId);
-    if (cached) return cached;
-    const missingGroupHints = getRouteMissingTokenGroupHints(routeId);
-    if (missingGroupHints.length === 0) return EMPTY_MISSING_GROUP_ITEMS;
-    const siteMap = new Map<string, MissingTokenGroupRouteSiteActionItem>();
-    for (const hint of missingGroupHints) {
-      for (const account of hint.accounts) {
-        if (!Number.isFinite(account.accountId) || account.accountId <= 0) continue;
-        const siteName = (account.siteName || '').trim() || `site-${account.siteId || 'unknown'}`;
-        const key = `${account.siteId || 0}::${siteName.toLowerCase()}`;
-        const accountLabel = account.username || `account-${account.accountId}`;
-        const missingGroups = Array.isArray(account.missingGroups) ? account.missingGroups : [];
-        const requiredGroups = Array.isArray(account.requiredGroups) ? account.requiredGroups : [];
-        const availableGroups = Array.isArray(account.availableGroups) ? account.availableGroups : [];
-        const existing = siteMap.get(key);
-        if (!existing) {
-          siteMap.set(key, {
-            key,
-            siteName,
-            accountId: account.accountId,
-            accountLabel,
-            missingGroups: [...missingGroups],
-            requiredGroups: [...requiredGroups],
-            availableGroups: [...availableGroups],
-            ...(account.groupCoverageUncertain === true ? { groupCoverageUncertain: true } : {}),
-          });
-          continue;
-        }
-        if (account.accountId < existing.accountId) {
-          existing.accountId = account.accountId;
-          existing.accountLabel = accountLabel;
-        }
-        existing.missingGroups = Array.from(new Set([...existing.missingGroups, ...missingGroups]))
-          .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-        existing.requiredGroups = Array.from(new Set([...existing.requiredGroups, ...requiredGroups]))
-          .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-        existing.availableGroups = Array.from(new Set([...existing.availableGroups, ...availableGroups]))
-          .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-        if (account.groupCoverageUncertain === true) {
-          existing.groupCoverageUncertain = true;
-        }
-      }
-    }
-    const items = Array.from(siteMap.values()).sort((a, b) => (
-      a.siteName.localeCompare(b.siteName, undefined, { sensitivity: 'base' })
-    ));
-    missingTokenGroupItemsCacheRef.current.cache.set(routeId, items);
-    return items;
-  };
-
-  // Stable callbacks for RouteCard memo (use refs to avoid dependency on closure variables)
-  const toggleExpandRef = useRef(toggleExpand);
-  toggleExpandRef.current = toggleExpand;
-  const stableToggleExpand = useCallback((routeId: number) => toggleExpandRef.current(routeId), []);
-  const handleEditRouteRef = useRef(handleEditRoute);
-  handleEditRouteRef.current = handleEditRoute;
-  const stableEditRoute = useCallback((route: RouteSummaryRow) => handleEditRouteRef.current(route), []);
-  const handleDeleteRouteRef = useRef(handleDeleteRoute);
-  handleDeleteRouteRef.current = handleDeleteRoute;
-  const stableDeleteRoute = useCallback((routeId: number) => { handleDeleteRouteRef.current(routeId); }, []);
-  const handleToggleEnabledRef = useRef(handleToggleRouteEnabled);
-  handleToggleEnabledRef.current = handleToggleRouteEnabled;
-  const stableToggleEnabled = useCallback((route: RouteSummaryRow) => { handleToggleEnabledRef.current(route); }, []);
-  const handleRoutingStrategyChangeRef = useRef(handleRoutingStrategyChange);
-  handleRoutingStrategyChangeRef.current = handleRoutingStrategyChange;
-  const stableRoutingStrategyChange = useCallback(
-    (route: RouteSummaryRow, strategy: RouteRoutingStrategy) => handleRoutingStrategyChangeRef.current(route, strategy),
-    [],
-  );
-  const stableTokenDraftChange = useCallback(
-    (channelId: number, tokenId: number) => setChannelTokenDraft((prev) => ({ ...prev, [channelId]: tokenId })),
-    [],
-  );
-  const stableAddChannel = useCallback((routeId: number) => {
-    loadCandidates();
-    setAddChannelModalRouteId(routeId);
-  }, []);
-  const stableToggleSourceGroup = useCallback(
-    (groupKey: string) => setExpandedSourceGroupMap((prev) => ({ ...prev, [groupKey]: !prev[groupKey] })),
-    [],
-  );
-  const handleChannelTokenSaveRef = useRef(handleChannelTokenSave);
-  handleChannelTokenSaveRef.current = handleChannelTokenSave;
-  const stableChannelTokenSave = useCallback(
-    (routeId: number, channelId: number, accountId: number) => handleChannelTokenSaveRef.current(routeId, channelId, accountId),
-    [],
-  );
-  const handleDeleteChannelRef = useRef(handleDeleteChannel);
-  handleDeleteChannelRef.current = handleDeleteChannel;
-  const stableDeleteChannel = useCallback(
-    (channelId: number, routeId: number) => handleDeleteChannelRef.current(channelId, routeId),
-    [],
-  );
-  const handleToggleChannelEnabledRef = useRef(handleToggleChannelEnabled);
-  handleToggleChannelEnabledRef.current = handleToggleChannelEnabled;
-  const stableToggleChannelEnabled = useCallback(
-    (channelId: number, routeId: number, enabled: boolean) => handleToggleChannelEnabledRef.current(channelId, routeId, enabled),
-    [],
-  );
-  const handleChannelDragEndRef = useRef(handleChannelDragEnd);
-  handleChannelDragEndRef.current = handleChannelDragEnd;
-  const stableChannelDragEnd = useCallback(
-    (routeId: number, event: DragEndEvent) => handleChannelDragEndRef.current(routeId, event),
-    [],
-  );
-  const handleCreateTokenRef = useRef(handleCreateTokenForMissingAccount);
-  handleCreateTokenRef.current = handleCreateTokenForMissingAccount;
-  const stableCreateTokenForMissing = useCallback(
-    (accountId: number, modelName: string) => handleCreateTokenRef.current(accountId, modelName),
-    [],
-  );
-  const handleSiteBlockModelRef = useRef(handleSiteBlockModel);
-  handleSiteBlockModelRef.current = handleSiteBlockModel;
-  const stableSiteBlockModel = useCallback(
-    (channelId: number, routeId: number) => handleSiteBlockModelRef.current(channelId, routeId),
-    [],
-  );
-  const handleClearRouteCooldownRef = useRef(handleClearRouteCooldown);
-  handleClearRouteCooldownRef.current = handleClearRouteCooldown;
-  const stableClearRouteCooldown = useCallback(
-    (routeId: number) => handleClearRouteCooldownRef.current(routeId),
-    [],
-  );
-
-  const addChannelModalRoute = addChannelModalRouteId
-    ? routeSummaries.find((r) => r.id === addChannelModalRouteId) || null
-    : null;
-
-  const handleAddChannelSuccess = async () => {
-    if (!addChannelModalRouteId) return;
-    // Reload channels for this route
-    await loadChannels(addChannelModalRouteId, true);
-    // Refresh summary to update channel count
-    await load();
   };
 
   return (
-    <div className="animate-fade-in" style={{ minHeight: 400 }}>
-      {/* Toolbar: search + sort + actions */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-        <div className="toolbar-search" style={{ minWidth: 220, flex: 1, maxWidth: 360 }}>
-          <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-            />
-          </svg>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={tr('搜索模型路由...')}
-          />
+    <div className="model-groups-page">
+      <div className="page-header model-groups-header">
+        <div>
+          <h1 className="page-title">模型分组</h1>
+          <p className="page-subtitle">下游只看到分组模型名，请求时按策略选择成员供应商。</p>
         </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ minWidth: 128 }}>
-            <ModernSelect
-              size="sm"
-              value={sortBy}
-              onChange={(nextValue) => {
-                const nextSortBy = nextValue as RouteSortBy;
-                setSortBy(nextSortBy);
-                setSortDir(nextSortBy === 'modelPattern' ? 'asc' : 'desc');
-              }}
-              options={[
-                { value: 'modelPattern', label: tr('模型名称') },
-                { value: 'channelCount', label: tr('通道数量') },
-              ]}
-              placeholder={tr('排序字段')}
-            />
-          </div>
-          <button
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '7px 11px', fontSize: 12 }}
-            onClick={() => setSortDir((prev) => (prev === 'asc' ? 'desc' : 'asc'))}
-            data-tooltip={tr('切换排序方向')}
-            aria-label={tr('切换排序方向')}
-          >
-            {sortDir === 'asc' ? tr('升序 ↑') : tr('降序 ↓')}
-          </button>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, borderLeft: '1px solid var(--color-border)', paddingLeft: 8 }}>
-          <button
-            onClick={handleRefreshRouteDecisions}
-            disabled={loadingDecision}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '7px 12px' }}
-          >
-            {loadingDecision ? (
-              <><span className="spinner spinner-sm" /> {tr('刷新中...')}</>
-            ) : (
-              tr('刷新选中概率')
-            )}
-          </button>
-
-          <button
-            onClick={handleRebuild}
-            disabled={rebuilding}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '7px 12px' }}
-          >
-            {rebuilding ? (
-              <><span className="spinner spinner-sm" /> {tr('重建中...')}</>
-            ) : (
-              tr('自动重建')
-            )}
-          </button>
-
-          <button
-            onClick={() => {
-              loadCandidates();
-              resetRouteForm();
-              setShowManual(true);
-            }}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '7px 12px' }}
-          >
-            {tr('新建群组')}
-          </button>
-
-          <button
-            onClick={toggleBatchSelectMode}
-            className={`btn ${batchSelectMode ? 'btn-primary' : 'btn-ghost'}`}
-            style={{ border: '1px solid var(--color-border)', padding: '7px 12px' }}
-          >
-            {batchSelectMode ? tr('退出批量') : tr('批量操作')}
-          </button>
-
+        <div className="page-actions">
           <button
             type="button"
-            aria-pressed={showZeroChannelRoutes}
-            onClick={() => {
-              if (!showZeroChannelRoutes) loadCandidates();
-              setShowZeroChannelRoutes((prev) => !prev);
-            }}
             className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '7px 12px' }}
+            onClick={rebuildSourceModels}
+            disabled={rebuilding}
           >
-            {showZeroChannelRoutes ? tr('隐藏 0 通道路由') : tr('显示 0 通道路由')}
+            {rebuilding ? '同步中...' : '同步供应商模型'}
+          </button>
+          <button type="button" className="btn btn-primary" onClick={startCreate}>
+            新建分组
           </button>
         </div>
-
-        <span className="badge badge-info" style={{ fontSize: 12, fontWeight: 500, marginLeft: 'auto' }}>
-          {tr('共')} {filteredRoutes.length} {tr('条路由')}
-        </span>
       </div>
 
-      {/* Collapsible filter panel */}
-      <ResponsiveFilterPanel
-        isMobile={isMobile}
-        mobileOpen={showFilters}
-        onMobileClose={() => setShowFilters(false)}
-        mobileTitle={tr('筛选路由')}
-        mobileTriggerWrapperClassName=""
-        mobileTrigger={(
-          <button
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '7px 12px', marginBottom: 8 }}
-            onClick={() => {
-              loadCandidates();
-              setShowFilters(true);
-            }}
-          >
-            {tr('筛选')}
-          </button>
-        )}
-        mobileContent={(
-          <RouteFilterBar
-            totalRouteCount={baseFilteredRoutes.length}
-            activeBrand={activeBrand}
-            setActiveBrand={setActiveBrand}
-            activeSite={activeSite}
-            setActiveSite={setActiveSite}
-            activeEndpointType={activeEndpointType}
-            setActiveEndpointType={setActiveEndpointType}
-            activeGroupFilter={activeGroupFilter}
-            setActiveGroupFilter={setActiveGroupFilter}
-            enabledFilter={enabledFilter}
-            setEnabledFilter={setEnabledFilter}
-            enabledCounts={enabledCounts}
-            brandList={brandList}
-            siteList={siteList}
-            endpointTypeList={endpointTypeList}
-            groupRouteList={groupRouteList}
-            collapsed={false}
-            onToggle={() => setShowFilters(false)}
-          />
-        )}
-        desktopContent={(
-          <RouteFilterBar
-            totalRouteCount={baseFilteredRoutes.length}
-            activeBrand={activeBrand}
-            setActiveBrand={setActiveBrand}
-            activeSite={activeSite}
-            setActiveSite={setActiveSite}
-            activeEndpointType={activeEndpointType}
-            setActiveEndpointType={setActiveEndpointType}
-            activeGroupFilter={activeGroupFilter}
-            setActiveGroupFilter={setActiveGroupFilter}
-            enabledFilter={enabledFilter}
-            setEnabledFilter={setEnabledFilter}
-            enabledCounts={enabledCounts}
-            brandList={brandList}
-            siteList={siteList}
-            endpointTypeList={endpointTypeList}
-            groupRouteList={groupRouteList}
-            collapsed={filterCollapsed}
-            onToggle={() => {
-              if (filterCollapsed) loadCandidates();
-              setFilterCollapsed((prev) => !prev);
-            }}
-          />
-        )}
-      />
-
-      {/* Manual route panel */}
-      <ManualRoutePanel
-        show={showManual}
-        editingRouteId={editingRouteId}
-        form={form}
-        setForm={setForm}
-        saving={saving}
-        canSave={canSaveRoute}
-        routeIconSelectOptions={routeIconSelectOptions}
-        previewModelSamples={previewModelSamples}
-        exactSourceRouteOptions={exactSourceRouteOptions}
-        sourceEndpointTypesByRouteId={sourceEndpointTypesByRouteId}
-        onSave={handleAddRoute}
-        onCancel={handleCancelEditRoute}
-      />
-
-      {/* Route card grid */}
-      {/* Batch selection floating bar */}
-      {batchSelectMode && (
-        <div className="route-batch-bar">
-          <span style={{ fontSize: 13, fontWeight: 500 }}>
-            {tr('已选择')} <b>{selectedRouteIds.size}</b> / {selectableRouteIds.size} {tr('条路由')}
-          </span>
-          <button className="btn btn-ghost" style={{ padding: '4px 12px', fontSize: 12 }} onClick={selectAllRoutes}>{tr('全选')}</button>
-          <button className="btn btn-ghost" style={{ padding: '4px 12px', fontSize: 12 }} onClick={deselectAllRoutes}>{tr('取消全选')}</button>
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-            <button
-              className="btn btn-warning"
-              style={{ padding: '6px 16px', fontSize: 13 }}
-              disabled={selectedRouteIds.size === 0 || batchUpdatingRoutes}
-              onClick={() => handleBatchUpdateRoutes('disable')}
-            >
-              {batchUpdatingRoutes ? <><span className="spinner spinner-sm" /> {tr('处理中...')}</> : tr('批量禁用')}
-            </button>
-            <button
-              className="btn btn-primary"
-              style={{ padding: '6px 16px', fontSize: 13 }}
-              disabled={selectedRouteIds.size === 0 || batchUpdatingRoutes}
-              onClick={() => handleBatchUpdateRoutes('enable')}
-            >
-              {batchUpdatingRoutes ? <><span className="spinner spinner-sm" /> {tr('处理中...')}</> : tr('批量启用')}
-            </button>
-          </div>
+      <section className="model-groups-overview" aria-label="模型分组概览">
+        <div className="model-groups-metric">
+          <span className="model-groups-metric-label">对外模型</span>
+          <strong>{formatCount(groupRoutes.length, '个')}</strong>
         </div>
-      )}
+        <div className="model-groups-metric">
+          <span className="model-groups-metric-label">启用中</span>
+          <strong>{formatCount(totalEnabledGroups, '个')}</strong>
+        </div>
+        <div className="model-groups-metric">
+          <span className="model-groups-metric-label">来源模型</span>
+          <strong>{formatCount(totalMemberRoutes, '个')}</strong>
+        </div>
+        <div className="model-groups-search">
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="搜索分组或来源模型"
+          />
+        </div>
+      </section>
 
-      <div className={isMobile ? 'mobile-card-list' : 'route-card-grid'}>
-        {visibleRoutes.map((route) => {
-          const isExpanded = expandedRouteIds.includes(route.id);
-          const isDesktopDetailClosing = closingDesktopDetailRouteIds.includes(route.id);
-          const isReadOnlyRoute = route.kind === 'zero_channel' || route.readOnly === true || route.isVirtual === true;
-          const exactRoute = isRouteExactModel(route);
-          const explicitGroupRoute = isExplicitGroupRoute(route);
-          const channelManagementDisabled = explicitGroupRoute;
-          const routeTitle = resolveRouteTitle(route);
-
-          const isSelectable = selectableRouteIds.has(route.id);
-          const isSelected = selectedRouteIds.has(route.id);
-
-          if (isMobile) {
-            return (
-              <div key={route.id} style={{ display: 'grid', gap: 8 }}>
-                <MobileCard
-                  title={routeTitle}
-                  headerActions={(
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      {batchSelectMode && isSelectable && (
-                        <label
-                          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontSize: 12 }}
-                        >
-                          <input
-                            data-testid={`route-select-${route.id}`}
-                            aria-label={`选择路由 ${routeTitle}`}
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={() => toggleRouteSelection(route.id)}
-                            style={{ width: 16, height: 16, cursor: 'pointer', accentColor: 'var(--color-primary, #4f46e5)' }}
-                          />
-                          <span>{tr('选择')}</span>
-                        </label>
-                      )}
-                      <span className={`badge ${isReadOnlyRoute ? 'badge-muted' : (route.enabled ? 'badge-success' : 'badge-muted')}`} style={{ fontSize: 10 }}>
-                        {isReadOnlyRoute ? tr('未生成') : (route.enabled ? tr('启用') : tr('禁用'))}
-                      </span>
-                    </div>
-                  )}
-                  footerActions={(
-                    <>
-                      <button
-                        type="button"
-                        className="btn btn-link"
-                        onClick={() => toggleExpand(route.id)}
-                      >
-                        {isExpanded ? tr('收起') : tr('详情')}
-                      </button>
-                      {!isReadOnlyRoute && (
-                        <button
-                          type="button"
-                          className="btn btn-link"
-                          onClick={() => handleEditRoute(route)}
-                        >
-                          {tr('编辑')}
-                        </button>
-                      )}
-                      {!isReadOnlyRoute && (
-                        <button
-                          type="button"
-                          className="btn btn-link"
-                          onClick={() => handleToggleRouteEnabled(route)}
-                        >
-                          {route.enabled ? tr('禁用') : tr('启用')}
-                        </button>
-                      )}
-                      {!isReadOnlyRoute && !channelManagementDisabled && (
-                        <button
-                          type="button"
-                          className="btn btn-link"
-                          onClick={() => stableAddChannel(route.id)}
-                        >
-                          {tr('添加通道')}
-                        </button>
-                      )}
-                    </>
-                  )}
-                >
-                  <MobileField label="模型" value={route.modelPattern} stacked />
-                  <MobileField label="通道" value={route.channelCount} />
-                  <MobileField label="策略" value={isReadOnlyRoute ? tr('未生成') : getRouteRoutingStrategyLabel(route.routingStrategy)} />
-                  <MobileField label="状态" value={isReadOnlyRoute ? tr('未生成') : (route.enabled ? tr('启用') : tr('禁用'))} />
-                  {explicitGroupRoute && (
-                    <MobileField label="模式" value={tr('群组聚合')} />
-                  )}
-                  {!exactRoute && !explicitGroupRoute && (
-                    <MobileField label="模式" value={tr('通配符路由')} />
-                  )}
-                </MobileCard>
-                {isExpanded && (
-                  <RouteCard
-                    route={route}
-                    brand={routeBrandById.get(route.id) || null}
-                    expanded
-                    compact
-                    onToggleExpand={stableToggleExpand}
-                    onEdit={stableEditRoute}
-                    onDelete={stableDeleteRoute}
-                    onToggleEnabled={stableToggleEnabled}
-                    onClearCooldown={stableClearRouteCooldown}
-                    clearingCooldown={!!clearingCooldownByRoute[route.id]}
-                    onRoutingStrategyChange={stableRoutingStrategyChange}
-                    updatingRoutingStrategy={!!updatingRoutingStrategyByRoute[route.id]}
-                    channels={channelsByRouteId[route.id]}
-                    loadingChannels={!!loadingChannelsByRouteId[route.id]}
-                    routeDecision={decisionByRoute[route.id] || null}
-                    loadingDecision={loadingDecision}
-                    candidateView={getRouteCandidateView(route.id)}
-                    channelTokenDraft={channelTokenDraft}
-                    updatingChannel={updatingChannel}
-                    savingPriority={!!savingPriorityByRoute[route.id]}
-                    onTokenDraftChange={stableTokenDraftChange}
-                    onSaveToken={stableChannelTokenSave}
-                    onDeleteChannel={stableDeleteChannel}
-                    onToggleChannelEnabled={stableToggleChannelEnabled}
-                    onChannelDragEnd={stableChannelDragEnd}
-                    missingTokenSiteItems={getMissingTokenSiteItems(route.id)}
-                    missingTokenGroupItems={getMissingTokenGroupItems(route.id)}
-                    onCreateTokenForMissing={stableCreateTokenForMissing}
-                    onAddChannel={stableAddChannel}
-                    onSiteBlockModel={stableSiteBlockModel}
-                    expandedSourceGroupMap={expandedSourceGroupMap}
-                    onToggleSourceGroup={stableToggleSourceGroup}
-                  />
-                )}
-              </div>
-            );
-          }
-
-          const summaryCard = (
-            <RouteCard
-              route={route}
-              brand={routeBrandById.get(route.id) || null}
-              expanded={false}
-              summaryExpanded={isExpanded || isDesktopDetailClosing}
-              onToggleExpand={stableToggleExpand}
-              onEdit={stableEditRoute}
-              onDelete={stableDeleteRoute}
-              onToggleEnabled={stableToggleEnabled}
-              onClearCooldown={stableClearRouteCooldown}
-              clearingCooldown={!!clearingCooldownByRoute[route.id]}
-              onRoutingStrategyChange={stableRoutingStrategyChange}
-              updatingRoutingStrategy={!!updatingRoutingStrategyByRoute[route.id]}
-              channels={channelsByRouteId[route.id]}
-              loadingChannels={!!loadingChannelsByRouteId[route.id]}
-              routeDecision={decisionByRoute[route.id] || null}
-              loadingDecision={loadingDecision}
-              candidateView={EMPTY_ROUTE_CANDIDATE_VIEW}
-              channelTokenDraft={channelTokenDraft}
-              updatingChannel={updatingChannel}
-              savingPriority={!!savingPriorityByRoute[route.id]}
-              onTokenDraftChange={stableTokenDraftChange}
-              onSaveToken={stableChannelTokenSave}
-              onDeleteChannel={stableDeleteChannel}
-              onToggleChannelEnabled={stableToggleChannelEnabled}
-              onChannelDragEnd={stableChannelDragEnd}
-              missingTokenSiteItems={EMPTY_MISSING_ITEMS}
-              missingTokenGroupItems={EMPTY_MISSING_GROUP_ITEMS}
-              onCreateTokenForMissing={stableCreateTokenForMissing}
-              onAddChannel={stableAddChannel}
-              onSiteBlockModel={stableSiteBlockModel}
-              expandedSourceGroupMap={expandedSourceGroupMap}
-              onToggleSourceGroup={stableToggleSourceGroup}
-            />
-          );
-          const detailPanel = (
-            <DesktopDetailPanelPresence open={isExpanded}>
-              {() => (
-                <RouteCard
-                  route={route}
-                  brand={routeBrandById.get(route.id) || null}
-                  expanded
-                  compact
-                  detailPanel
-                  onToggleExpand={stableToggleExpand}
-                  onEdit={stableEditRoute}
-                  onDelete={stableDeleteRoute}
-                  onToggleEnabled={stableToggleEnabled}
-                  onClearCooldown={stableClearRouteCooldown}
-                  clearingCooldown={!!clearingCooldownByRoute[route.id]}
-                  onRoutingStrategyChange={stableRoutingStrategyChange}
-                  updatingRoutingStrategy={!!updatingRoutingStrategyByRoute[route.id]}
-                  channels={channelsByRouteId[route.id]}
-                  loadingChannels={!!loadingChannelsByRouteId[route.id]}
-                  routeDecision={decisionByRoute[route.id] || null}
-                  loadingDecision={loadingDecision}
-                  candidateView={getRouteCandidateView(route.id)}
-                  channelTokenDraft={channelTokenDraft}
-                  updatingChannel={updatingChannel}
-                  savingPriority={!!savingPriorityByRoute[route.id]}
-                  onTokenDraftChange={stableTokenDraftChange}
-                  onSaveToken={stableChannelTokenSave}
-                  onDeleteChannel={stableDeleteChannel}
-                  onToggleChannelEnabled={stableToggleChannelEnabled}
-                  onChannelDragEnd={stableChannelDragEnd}
-                  missingTokenSiteItems={getMissingTokenSiteItems(route.id)}
-                  missingTokenGroupItems={getMissingTokenGroupItems(route.id)}
-                  onCreateTokenForMissing={stableCreateTokenForMissing}
-                  onAddChannel={stableAddChannel}
-                  onSiteBlockModel={stableSiteBlockModel}
-                  expandedSourceGroupMap={expandedSourceGroupMap}
-                  onToggleSourceGroup={stableToggleSourceGroup}
-                />
-              )}
-            </DesktopDetailPanelPresence>
-          );
-
-          if (batchSelectMode && isSelectable) {
-            return (
-              <Fragment key={route.id}>
-                <div style={{ display: 'flex', gap: 0, alignItems: 'stretch' }}>
-                  <div
-                    onClick={() => toggleRouteSelection(route.id)}
-                    style={{
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      width: 36, minHeight: '100%', cursor: 'pointer',
-                      borderRadius: '8px 0 0 8px',
-                      background: isSelected ? 'var(--color-primary, #4f46e5)' : 'var(--color-bg-card, #fff)',
-                      border: '1px solid var(--color-border)',
-                      borderRight: 'none',
-                      transition: 'background 0.15s',
-                    }}
-                  >
-                    <input
-                      data-testid={`route-select-${route.id}`}
-                      aria-label={`选择路由 ${routeTitle}`}
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => toggleRouteSelection(route.id)}
-                      onClick={(e) => e.stopPropagation()}
-                      style={{ width: 16, height: 16, cursor: 'pointer', accentColor: 'var(--color-primary, #4f46e5)' }}
-                    />
+      <div className="model-groups-layout">
+        <section className="model-groups-list" aria-label="模型分组列表">
+          {loading ? (
+            <div className="empty-state">
+              <div className="empty-state-title">正在加载模型分组</div>
+            </div>
+          ) : filteredGroups.length === 0 ? (
+            <div className="model-groups-empty">
+              <div className="empty-state-icon">M</div>
+              <div className="empty-state-title">还没有模型分组</div>
+              <div className="empty-state-desc">先同步供应商模型，再把同类模型放进一个对外名称。</div>
+              <button type="button" className="btn btn-primary" onClick={startCreate}>新建分组</button>
+            </div>
+          ) : showSeparatedGroupSections ? (
+            <div className="model-groups-list-sections">
+              <section className="model-groups-list-section is-switch" aria-label="切换分组列表">
+                <div className="model-groups-list-section-header">
+                  <div>
+                    <span className="model-groups-list-section-title">切换分组</span>
+                    <span className="model-groups-list-section-count">
+                      {filteredSwitchGroups.length} / {switchGroupCount}
+                    </span>
                   </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    {summaryCard}
-                  </div>
+                  <span className="model-group-type-badge is-switch">后台指向</span>
                 </div>
-                {detailPanel}
-              </Fragment>
-            );
-          }
-
-          return (
-            <Fragment key={route.id}>
-              {summaryCard}
-              {detailPanel}
-            </Fragment>
-          );
-        })}
+                {filteredSwitchGroups.length === 0 ? (
+                  <div className="model-groups-list-section-empty">没有匹配的切换分组</div>
+                ) : filteredSwitchGroups.map(renderGroupCard)}
+              </section>
+              <section className="model-groups-list-section" aria-label="普通分组列表">
+                <div className="model-groups-list-section-header">
+                  <div>
+                    <span className="model-groups-list-section-title">普通分组</span>
+                    <span className="model-groups-list-section-count">
+                      {filteredNormalGroups.length} / {normalGroupCount}
+                    </span>
+                  </div>
+                  <span className="model-group-type-badge">策略分发</span>
+                </div>
+                {filteredNormalGroups.length === 0 ? (
+                  <div className="model-groups-list-section-empty">没有匹配的普通分组</div>
+                ) : filteredNormalGroups.map(renderGroupCard)}
+              </section>
+            </div>
+          ) : (
+            filteredGroups.map(renderGroupCard)
+          )}
+        </section>
       </div>
 
-      {shouldShowLoadMore && (
+      {editorOpen && (
+        <BodyPortal>
         <div
-          ref={loadMoreSentinelRef}
-          style={{ textAlign: 'center', padding: '12px 0', fontSize: 12, color: 'var(--color-text-muted)' }}
+          className="model-group-editor-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeEditor();
+          }}
         >
-          {tr('当前已加载路由')} {visibleRouteCount} / {filteredRoutes.length}
-        </div>
-      )}
-
-      {filteredRoutes.length === 0 && (
-        <div className="card">
-          <div className="empty-state">
-            <svg className="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={1}
-                d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"
-              />
-            </svg>
-            <div className="empty-state-title">{routeSummaries.length === 0 ? '暂无路由' : '没有匹配的路由'}</div>
-            <div className="empty-state-desc">
-              {routeSummaries.length === 0
-                ? '点击"自动重建"可按当前模型可用性生成路由。'
-                : '请调整品牌筛选、搜索词或排序条件。'}
+        <aside
+          className="model-group-editor model-group-editor-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="model-group-editor-title"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <div className="model-group-editor-header">
+            <div>
+              <h2 id="model-group-editor-title">{editingRoute ? '编辑分组' : '新建分组'}</h2>
+              <p>{editingRoute ? resolveRouteTitle(editingRoute) : '为下游创建一个稳定模型名'}</p>
+            </div>
+            <div className="model-group-editor-header-actions">
+              {editingRoute && (
+                <button type="button" className="btn-link" onClick={startCreate}>新建</button>
+              )}
+              <button type="button" className="btn-link" onClick={closeEditor}>关闭</button>
             </div>
           </div>
-        </div>
-      )}
 
-      {/* Add channel modal */}
-      {addChannelModalRoute && (
-        <AddChannelModal
-          open={!!addChannelModalRouteId}
-          onClose={() => setAddChannelModalRouteId(null)}
-          routeId={addChannelModalRoute.id}
-          routeTitle={resolveRouteTitle(addChannelModalRoute)}
-          candidateView={getRouteCandidateView(addChannelModalRoute.id)}
-          onSuccess={handleAddChannelSuccess}
-          missingTokenHints={getRouteMissingTokenHints(addChannelModalRoute.id)}
-          onCreateTokenForMissing={handleCreateTokenForMissingAccount}
-          existingChannelAccountIds={new Set((channelsByRouteId[addChannelModalRoute.id] || []).map((c) => c.accountId))}
-        />
+          <div className="model-group-form">
+            <label className="model-group-field">
+              <FieldLabel>下游模型名</FieldLabel>
+              <input
+                value={form.name}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setForm((prev) => ({
+                    ...prev,
+                    name: value,
+                    autoQuery: prev.autoQuery || value,
+                  }));
+                }}
+                placeholder="例如 gpt-5.5"
+              />
+            </label>
+
+            <div className="model-group-field">
+              <FieldLabel>分组类型</FieldLabel>
+              <div className="model-group-mode-control" role="group" aria-label="分组类型">
+                <button
+                  type="button"
+                  className={form.mode === 'explicit_group' ? 'is-active' : ''}
+                  onClick={() => updateGroupMode('explicit_group')}
+                >
+                  普通分组
+                </button>
+                <button
+                  type="button"
+                  className={form.mode === 'switch_group' ? 'is-active' : ''}
+                  onClick={() => updateGroupMode('switch_group')}
+                >
+                  切换分组
+                </button>
+              </div>
+              <div className="model-group-field-hint">
+                {form.mode === 'switch_group'
+                  ? '下游固定请求此模型名，后台手动切换当前入口目标。'
+                  : '下游请求此模型名时，按策略在成员供应商模型中选择。'}
+              </div>
+            </div>
+
+            <div className="model-group-field">
+              <FieldLabel>选择策略</FieldLabel>
+              <ModernSelect
+                value={form.routingStrategy}
+                onChange={(value) => setForm((prev) => ({
+                  ...prev,
+                  routingStrategy: normalizeRouteRoutingStrategyValue(value as RouteRoutingStrategy),
+                }))}
+                options={STRATEGY_OPTIONS}
+              />
+              <div className="model-group-field-hint">
+                {getRouteRoutingStrategyDescription(form.routingStrategy)}
+              </div>
+            </div>
+
+            <div className="model-group-field">
+              <FieldLabel>Header 模板</FieldLabel>
+              <ModernSelect
+                value={form.customHeaderTemplateId ? String(form.customHeaderTemplateId) : ''}
+                onChange={(value) => setForm((prev) => ({
+                  ...prev,
+                  customHeaderTemplateId: value ? Number(value) : null,
+                }))}
+                options={headerTemplateOptions}
+                searchable
+                searchPlaceholder="搜索模板"
+                emptyLabel="暂无 Header 模板"
+              />
+              <div className="model-group-field-hint">
+                {selectedHeaderTemplate
+                  ? `${selectedHeaderTemplate.name} / ${countSerializedHeaders(selectedHeaderTemplate.headers)} 个 Header`
+                  : '未选择模板'}
+              </div>
+            </div>
+
+            <div className="model-group-field">
+              <div className="model-group-header-toolbar">
+                <FieldLabel>分组自定义 Header</FieldLabel>
+                <button type="button" className="btn-link" onClick={addHeaderField}>添加</button>
+              </div>
+              <div className="model-group-header-list">
+                {form.customHeaders.map((field, index) => (
+                  <div key={index} className="model-group-header-row">
+                    <input
+                      value={field.key}
+                      onChange={(event) => updateHeaderField(index, { key: event.target.value })}
+                      placeholder="Header 名称"
+                    />
+                    <input
+                      value={field.value}
+                      onChange={(event) => updateHeaderField(index, { value: event.target.value })}
+                      placeholder="Header 值"
+                    />
+                    <button
+                      type="button"
+                      className="btn-link btn-link-danger"
+                      onClick={() => removeHeaderField(index)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="model-group-field-hint">
+                当前分组配置 {countHeaderFields(form.customHeaders)} 个 Header。
+              </div>
+            </div>
+
+            <label className="model-group-field">
+              <FieldLabel>自动匹配关键词</FieldLabel>
+              <div className="model-group-inline-control">
+                <input
+                  value={form.autoQuery}
+                  onChange={(event) => setForm((prev) => ({ ...prev, autoQuery: event.target.value }))}
+                  placeholder="默认使用下游模型名"
+                />
+                <button type="button" className="btn btn-soft-primary" onClick={applyAutoMatch}>
+                  自动匹配
+                </button>
+              </div>
+              <div className="model-group-field-hint">
+                当前可匹配 {autoMatchedIds.length} 个供应商模型。
+              </div>
+            </label>
+
+            <div className="model-group-source-toolbar">
+              <div>
+                <FieldLabel>{form.mode === 'switch_group' ? '入口目标' : '成员模型'}</FieldLabel>
+                <span>{selectedSourceRoutes.length} / {sourceCandidateRoutes.length}</span>
+              </div>
+              <div className="model-group-source-tools">
+                <button
+                  type="button"
+                  className="btn-link"
+                  onClick={() => selectSourceRoutes(visibleSourceRoutes.map((route) => route.id))}
+                  disabled={visibleSourceRoutes.length === 0 || allVisibleSourcesSelected}
+                >
+                  {allVisibleSourcesSelected ? '已全选可见' : '全选可见'}
+                </button>
+                <button
+                  type="button"
+                  className="btn-link"
+                  onClick={clearSourceRoutes}
+                  disabled={form.sourceRouteIds.length === 0}
+                >
+                  清空
+                </button>
+                <input
+                  type="search"
+                  value={sourceSearch}
+                  onChange={(event) => setSourceSearch(event.target.value)}
+                  placeholder={form.mode === 'switch_group' ? '搜索分组或供应商单模型' : '搜索来源模型'}
+                />
+              </div>
+            </div>
+
+            <div className="model-group-source-list">
+              {form.mode === 'switch_group' ? (
+                <>
+                  <section className="model-group-source-section" aria-label="普通分组">
+                    <div className="model-group-source-section-header">
+                      <div>
+                        <span className="model-group-source-section-title">普通分组</span>
+                        <span className="model-group-source-section-count">
+                          已选 {selectedSwitchGroupTargetCount} / {switchGroupTargetRoutes.length}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-link"
+                        onClick={() => selectSourceRoutes(filteredSwitchGroupTargetRoutes.map((route) => route.id))}
+                        disabled={filteredSwitchGroupTargetRoutes.length === 0 || allVisibleSwitchGroupTargetsSelected}
+                      >
+                        {allVisibleSwitchGroupTargetsSelected ? '已全选' : '全选'}
+                      </button>
+                    </div>
+                    {filteredSwitchGroupTargetRoutes.length === 0 ? (
+                      <div className="model-group-source-empty">没有匹配的普通分组</div>
+                    ) : filteredSwitchGroupTargetRoutes.map(renderSourceRow)}
+                  </section>
+                  <section className="model-group-source-section" aria-label="供应商单模型">
+                    <div className="model-group-source-section-header">
+                      <div>
+                        <span className="model-group-source-section-title">供应商单模型</span>
+                        <span className="model-group-source-section-count">
+                          已选 {selectedSwitchModelTargetCount} / {switchModelTargetRoutes.length}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-link"
+                        onClick={() => selectSourceRoutes(filteredSwitchModelTargetRoutes.map((route) => route.id))}
+                        disabled={filteredSwitchModelTargetRoutes.length === 0 || allVisibleSwitchModelTargetsSelected}
+                      >
+                        {allVisibleSwitchModelTargetsSelected ? '已全选' : '全选'}
+                      </button>
+                    </div>
+                    {filteredSwitchModelTargetRoutes.length === 0 ? (
+                      <div className="model-group-source-empty">没有匹配的供应商单模型</div>
+                    ) : filteredSwitchModelTargetRoutes.map(renderSourceRow)}
+                  </section>
+                </>
+              ) : filteredSourceRoutes.length === 0 ? (
+                <div className="model-group-source-empty">没有可选来源模型</div>
+              ) : filteredSourceRoutes.map(renderSourceRow)}
+            </div>
+
+            {form.mode === 'switch_group' && (
+              <div className="model-group-field">
+                <FieldLabel>当前指向</FieldLabel>
+                <ModernSelect
+                  value={form.activeSourceRouteId ? String(form.activeSourceRouteId) : ''}
+                  onChange={(value) => setForm((prev) => ({
+                    ...prev,
+                    activeSourceRouteId: value ? Number(value) : null,
+                  }))}
+                  options={[
+                    { value: '', label: '请选择当前目标', description: '保存后下游请求会转发到此目标' },
+                    ...selectedSwitchTargetRoutes.map((route) => ({
+                      value: String(route.id),
+                      label: getSourceTargetLabel(route),
+                      description: `${getSourceTargetTypeLabel(route)} / ${formatCount(route.enabledChannelCount, '可用通道')}`,
+                    })),
+                  ]}
+                  searchable
+                  searchPlaceholder="搜索已选目标"
+                  emptyLabel="请先选择入口目标"
+                />
+                <div className="model-group-field-hint">
+                  {activeTargetRoute
+                    ? `当前下游请求会走 ${getSourceTargetLabel(activeTargetRoute)}。`
+                    : '选择一个已勾选目标作为当前承接入口。'}
+                </div>
+              </div>
+            )}
+
+            <label className="model-group-enabled-row">
+              <input
+                type="checkbox"
+                checked={form.enabled}
+                onChange={(event) => setForm((prev) => ({ ...prev, enabled: event.target.checked }))}
+              />
+              <span>启用此分组</span>
+            </label>
+
+            <div className="model-group-form-actions">
+              <button type="button" className="btn btn-primary" onClick={saveGroup} disabled={!canSave}>
+                {saving ? '保存中...' : (editingRoute ? '保存分组' : '创建分组')}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={closeEditor}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </aside>
+        </div>
+        </BodyPortal>
       )}
     </div>
   );

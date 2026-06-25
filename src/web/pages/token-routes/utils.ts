@@ -61,8 +61,17 @@ export function isExplicitGroupRoute(route: Pick<RouteRow | RouteSummaryRow, 'ro
   return normalizeRouteMode(route.routeMode) === 'explicit_group';
 }
 
+export function isSwitchGroupRoute(route: Pick<RouteRow | RouteSummaryRow, 'routeMode'>): boolean {
+  return normalizeRouteMode(route.routeMode) === 'switch_group';
+}
+
+export function isPublicGroupRoute(route: Pick<RouteRow | RouteSummaryRow, 'routeMode'>): boolean {
+  const routeMode = normalizeRouteMode(route.routeMode);
+  return routeMode === 'explicit_group' || routeMode === 'switch_group';
+}
+
 export function isRouteExactModel(route: Pick<RouteRow | RouteSummaryRow, 'modelPattern' | 'routeMode'>): boolean {
-  return !isExplicitGroupRoute(route) && isExactModelPattern(route.modelPattern);
+  return !isPublicGroupRoute(route) && isExactModelPattern(route.modelPattern);
 }
 
 export function parseRegexModelPattern(modelPattern: string): { regex: { test(value: string): boolean } | null; error: string | null } {

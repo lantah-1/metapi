@@ -170,12 +170,9 @@ export default function Accounts() {
     models: Array<{
       name: string;
       latencyMs: number | null;
-      disabled: boolean;
       isManual?: boolean;
     }>;
-    pendingDisabled: Set<string>;
     loading: boolean;
-    saving: boolean;
     siteName: string;
     manualModelsInput: string;
     addingManualModels: boolean;
@@ -183,9 +180,7 @@ export default function Accounts() {
     open: false,
     account: null,
     models: [],
-    pendingDisabled: new Set(),
     loading: false,
-    saving: false,
     siteName: "",
     manualModelsInput: "",
     addingManualModels: false,
@@ -604,14 +599,10 @@ export default function Accounts() {
 
   const applyLoadedModelModal = (account: any, result: any) => {
     const models = Array.isArray(result?.models) ? result.models : [];
-    const disabledSet = new Set<string>(
-      models.filter((m: any) => m.disabled).map((m: any) => m.name as string),
-    );
     setModelModal((s) => ({
       ...s,
       loading: false,
       models,
-      pendingDisabled: disabledSet,
       siteName: result?.siteName || account.site?.name || s.siteName,
     }));
   };
@@ -635,7 +626,6 @@ export default function Accounts() {
       ...(options.resetBeforeLoad
         ? {
             models: [],
-            pendingDisabled: new Set<string>(),
             siteName: "",
             manualModelsInput: "",
           }
@@ -679,38 +669,6 @@ export default function Accounts() {
       manualModelsInput: "",
       addingManualModels: false,
     }));
-  };
-
-  const toggleModelDisabled = (modelName: string) => {
-    setModelModal((s) => {
-      const next = new Set(s.pendingDisabled);
-      if (next.has(modelName)) next.delete(modelName);
-      else next.add(modelName);
-      return { ...s, pendingDisabled: next };
-    });
-  };
-
-  const saveModelDisabled = async () => {
-    if (!modelModal.account) return;
-    const siteId = modelModal.account.siteId;
-    setModelModal((s) => ({ ...s, saving: true }));
-    try {
-      await api.updateSiteDisabledModels(
-        siteId,
-        Array.from(modelModal.pendingDisabled),
-      );
-      try {
-        await api.rebuildRoutes(false, false);
-        toast.success("模型禁用设置已保存，路由已重建");
-      } catch {
-        toast.error("模型禁用设置已保存，但路由重建失败，请手动刷新路由");
-      }
-      closeModelModal();
-    } catch (e: any) {
-      toast.error(e.message || "保存失败");
-    } finally {
-      setModelModal((s) => ({ ...s, saving: false }));
-    }
   };
 
   const handleAddManualModels = async () => {
@@ -3460,7 +3418,6 @@ export default function Accounts() {
         modelModal={modelModal}
         inputStyle={inputStyle}
         onClose={closeModelModal}
-        onSave={saveModelDisabled}
         onRefresh={async () => {
           if (!modelModal.account) return;
           await loadModelModalModels(modelModal.account, {
@@ -3469,10 +3426,6 @@ export default function Accounts() {
             errorMessage: "刷新失败",
           });
         }}
-        onToggleModelDisabled={toggleModelDisabled}
-        onSetPendingDisabled={(pendingDisabled) =>
-          setModelModal((state) => ({ ...state, pendingDisabled }))
-        }
         onManualInputChange={(value) =>
           setModelModal((state) => ({ ...state, manualModelsInput: value }))
         }

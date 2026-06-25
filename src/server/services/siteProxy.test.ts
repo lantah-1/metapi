@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sql } from 'drizzle-orm';
 import { SocksClient } from 'socks';
-import { Headers, fetch } from 'undici';
+import { fetch } from 'undici';
 
 type DbModule = typeof import('../db/index.js');
 
@@ -171,7 +171,7 @@ describe('siteProxy', () => {
     }
   });
 
-  it('merges site custom headers by matched request url and keeps explicit headers authoritative', async () => {
+  it('ignores legacy site custom headers by matched request url', async () => {
     await db.insert(schema.sites).values({
       name: 'headers-site',
       url: 'https://headers-site.example.com',
@@ -190,52 +190,29 @@ describe('siteProxy', () => {
         'X-Trace-Id': 'trace-1',
       },
     });
-    const headers = new Headers(requestInit.headers);
 
-    expect(headers.get('cf-access-client-id')).toBe('site-client');
-    expect(headers.get('authorization')).toBe('Bearer request-token');
-    expect(headers.get('x-trace-id')).toBe('trace-1');
+    expect(requestInit.headers).toEqual({
+      Authorization: 'Bearer request-token',
+      'X-Trace-Id': 'trace-1',
+    });
   });
 
-  it('merges site custom headers from site records even without cache lookup', async () => {
+  it('preserves explicit request headers for site record proxy init', async () => {
     const { withSiteRecordProxyRequestInit } = await import('./siteProxy.js');
     const requestInit = withSiteRecordProxyRequestInit({
       proxyUrl: 'http://127.0.0.1:7890',
       useSystemProxy: false,
-      customHeaders: JSON.stringify({
-        'x-site-scope': 'site-level',
-      }),
     }, {
       method: 'POST',
       headers: {
         'X-Request-Id': 'req-1',
       },
     });
-    const headers = new Headers(requestInit.headers);
 
-    expect(headers.get('x-site-scope')).toBe('site-level');
-    expect(headers.get('x-request-id')).toBe('req-1');
+    expect(requestInit.headers).toEqual({
+      'X-Request-Id': 'req-1',
+    });
     expect('dispatcher' in requestInit).toBe(true);
-  });
-
-  it('merges parsed-object site custom headers from site records', async () => {
-    const { withSiteRecordProxyRequestInit } = await import('./siteProxy.js');
-    const requestInit = withSiteRecordProxyRequestInit({
-      proxyUrl: 'http://127.0.0.1:7890',
-      useSystemProxy: false,
-      customHeaders: {
-        'x-site-scope': 'site-level',
-      },
-    }, {
-      method: 'POST',
-      headers: {
-        'X-Request-Id': 'req-1',
-      },
-    });
-    const headers = new Headers(requestInit.headers);
-
-    expect(headers.get('x-site-scope')).toBe('site-level');
-    expect(headers.get('x-request-id')).toBe('req-1');
   });
 
   it('resolveChannelProxyUrl prefers account proxy over site proxy', async () => {

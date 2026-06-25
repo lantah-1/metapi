@@ -1,12 +1,12 @@
 import { Headers, type HeadersInit } from 'undici';
 
-export type SiteCustomHeadersRecord = Record<string, string>;
+export type CustomHeadersRecord = Record<string, string>;
 
-export type ParsedSiteCustomHeadersInput = {
+export type ParsedCustomHeadersInput = {
   present: boolean;
   valid: boolean;
   customHeaders: string | null;
-  headers: SiteCustomHeadersRecord | null;
+  headers: CustomHeadersRecord | null;
   error?: string;
 };
 
@@ -14,7 +14,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Object.prototype.toString.call(value) === '[object Object]';
 }
 
-function normalizeSiteCustomHeadersRecord(input: Record<string, unknown>): SiteCustomHeadersRecord | null {
+function normalizeCustomHeadersRecord(input: Record<string, unknown>): CustomHeadersRecord | null {
   const normalized = new Headers();
 
   for (const [rawKey, rawValue] of Object.entries(input)) {
@@ -36,7 +36,7 @@ function normalizeSiteCustomHeadersRecord(input: Record<string, unknown>): SiteC
   return Object.fromEntries(entries);
 }
 
-export function parseSiteCustomHeadersInput(input: unknown): ParsedSiteCustomHeadersInput {
+export function parseCustomHeadersInput(input: unknown): ParsedCustomHeadersInput {
   if (input === undefined) {
     return { present: false, valid: true, customHeaders: null, headers: null };
   }
@@ -74,7 +74,7 @@ export function parseSiteCustomHeadersInput(input: unknown): ParsedSiteCustomHea
   }
 
   try {
-    const headers = normalizeSiteCustomHeadersRecord(parsedInput);
+    const headers = normalizeCustomHeadersRecord(parsedInput);
     return {
       present: true,
       valid: true,
@@ -94,24 +94,24 @@ export function parseSiteCustomHeadersInput(input: unknown): ParsedSiteCustomHea
   }
 }
 
-export function readSiteCustomHeaders(input: unknown): SiteCustomHeadersRecord | null {
-  const parsed = parseSiteCustomHeadersInput(input);
+export function readCustomHeaders(input: unknown): CustomHeadersRecord | null {
+  const parsed = parseCustomHeadersInput(input);
   if (!parsed.valid) {
     return null;
   }
   return parsed.headers;
 }
 
-export function mergeHeadersWithSiteCustomHeaders(
-  siteCustomHeaders: unknown,
+export function mergeHeadersWithCustomHeaders(
+  customHeaders: unknown,
   requestHeaders?: HeadersInit,
 ): HeadersInit | undefined {
-  const normalizedSiteHeaders = readSiteCustomHeaders(siteCustomHeaders);
-  if (!normalizedSiteHeaders) {
+  const normalizedCustomHeaders = readCustomHeaders(customHeaders);
+  if (!normalizedCustomHeaders) {
     return requestHeaders;
   }
 
-  const merged = new Headers(normalizedSiteHeaders);
+  const merged = new Headers(normalizedCustomHeaders);
   if (requestHeaders) {
     const explicitHeaders = new Headers(requestHeaders);
     explicitHeaders.forEach((value, key) => {
@@ -119,4 +119,21 @@ export function mergeHeadersWithSiteCustomHeaders(
     });
   }
   return merged;
+}
+
+export function mergeHeaderRecords(
+  ...sources: Array<unknown>
+): Record<string, string> {
+  const merged = new Headers();
+
+  for (const source of sources) {
+    if (!source) continue;
+    const parsed = readCustomHeaders(source);
+    if (!parsed) continue;
+    for (const [key, value] of Object.entries(parsed)) {
+      merged.set(key, value);
+    }
+  }
+
+  return Object.fromEntries(merged.entries());
 }

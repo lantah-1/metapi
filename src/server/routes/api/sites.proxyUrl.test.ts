@@ -36,7 +36,7 @@ describe('sites proxy settings', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('stores proxy settings, external checkin url, and custom headers when creating a site', async () => {
+  it('stores proxy settings and external checkin url when creating a site', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/sites',
@@ -57,17 +57,29 @@ describe('sites proxy settings', () => {
 
     expect(response.statusCode).toBe(200);
     const payload = response.json() as {
+      id: number;
       proxyUrl?: string | null;
       useSystemProxy?: boolean;
-      customHeaders?: string | null;
       externalCheckinUrl?: string | null;
       globalWeight?: number;
     };
     expect(payload.proxyUrl).toBe('socks5://127.0.0.1:1080');
     expect(payload.useSystemProxy).toBe(true);
-    expect(payload.customHeaders).toBe('{"cf-access-client-id":"site-client-id","x-site-scope":"internal"}');
+    expect(payload).not.toHaveProperty('customHeaders');
     expect(payload.externalCheckinUrl).toBe('https://checkin.example.com/welfare');
     expect(payload.globalWeight).toBe(1.5);
+
+    const storedRows = await db.select({ customHeaders: schema.sites.customHeaders }).from(schema.sites).all();
+    expect(storedRows).toHaveLength(1);
+    expect(storedRows[0]?.customHeaders).toBeNull();
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: '/api/sites',
+    });
+    expect(listResponse.statusCode).toBe(200);
+    const listPayload = listResponse.json() as Array<Record<string, unknown>>;
+    expect(listPayload[0]).not.toHaveProperty('customHeaders');
   });
 
   it('returns a conflict response when the same platform and url already exist', async () => {
@@ -225,9 +237,6 @@ describe('sites proxy settings', () => {
         platform: 'new-api',
         proxyUrl: 'http://127.0.0.1:8080',
         useSystemProxy: true,
-        customHeaders: JSON.stringify({
-          'x-site-scope': 'internal',
-        }),
         externalCheckinUrl: 'https://checkin.example.com/welfare',
       },
     });
@@ -240,7 +249,6 @@ describe('sites proxy settings', () => {
       payload: {
         proxyUrl: '',
         useSystemProxy: false,
-        customHeaders: '',
         externalCheckinUrl: '',
       },
     });
@@ -249,12 +257,11 @@ describe('sites proxy settings', () => {
     const payload = response.json() as {
       proxyUrl?: string | null;
       useSystemProxy?: boolean;
-      customHeaders?: string | null;
       externalCheckinUrl?: string | null;
     };
     expect(payload.proxyUrl).toBeNull();
     expect(payload.useSystemProxy).toBe(false);
-    expect(payload.customHeaders).toBeNull();
+    expect(payload).not.toHaveProperty('customHeaders');
     expect(payload.externalCheckinUrl).toBeNull();
   });
 
@@ -320,7 +327,7 @@ describe('sites proxy settings', () => {
     expect((response.json() as { error?: string }).error).toContain('platform');
   });
 
-  it('rejects invalid custom headers json', async () => {
+  it('ignores deprecated site custom headers payloads', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/sites',
@@ -332,26 +339,25 @@ describe('sites proxy settings', () => {
       },
     });
 
-    expect(response.statusCode).toBe(400);
-    expect((response.json() as { error?: string }).error).toContain('Invalid customHeaders');
-  });
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as { id: number };
+    expect(payload).not.toHaveProperty('customHeaders');
 
-  it('rejects custom headers with non-string values', async () => {
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/sites',
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/sites/${payload.id}`,
       payload: {
-        name: 'headers-site',
-        url: 'https://headers-site.example.com',
-        platform: 'new-api',
         customHeaders: JSON.stringify({
           'x-site-scope': true,
         }),
       },
     });
 
-    expect(response.statusCode).toBe(400);
-    expect((response.json() as { error?: string }).error).toContain('must use a string value');
+    expect(updateResponse.statusCode).toBe(200);
+    expect(updateResponse.json()).not.toHaveProperty('customHeaders');
+
+    const storedRows = await db.select({ customHeaders: schema.sites.customHeaders }).from(schema.sites).all();
+    expect(storedRows[0]?.customHeaders).toBeNull();
   });
 
   it('rejects create payloads whose name is not a string', async () => {

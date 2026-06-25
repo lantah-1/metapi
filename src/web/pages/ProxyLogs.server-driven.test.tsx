@@ -11,6 +11,7 @@ const { apiMock } = vi.hoisted(() => ({
     getProxyLogsQuery: vi.fn(),
     getProxyLogsMeta: vi.fn(),
     getProxyLogDetail: vi.fn(),
+    clearProxyLogs: vi.fn(),
     getProxyDebugTraces: vi.fn(),
     getProxyDebugTraceDetail: vi.fn(),
     getRuntimeSettings: vi.fn(),
@@ -209,6 +210,12 @@ describe('ProxyLogs server-driven page', () => {
         },
       },
     });
+    apiMock.clearProxyLogs.mockResolvedValue({
+      success: true,
+      deletedProxyLogs: 1,
+      deletedDebugTraces: 1,
+      deletedDebugAttempts: 1,
+    });
     apiMock.getProxyDebugTraces.mockResolvedValue({
       items: [
         {
@@ -287,6 +294,104 @@ describe('ProxyLogs server-driven page', () => {
       await act(async () => {
         root?.unmount();
       });
+    }
+  });
+
+  it('clears usage log records through the dedicated logs endpoint and reloads the page data', async () => {
+    const confirmMock = vi.fn(() => true);
+    Object.defineProperty(globalThis, 'confirm', {
+      value: confirmMock,
+      configurable: true,
+      writable: true,
+    });
+
+    apiMock.getProxyLogs
+      .mockResolvedValueOnce(buildListResponse())
+      .mockResolvedValueOnce(buildListResponse({
+        items: [],
+        total: 0,
+        page: 1,
+        pageSize: 50,
+      }));
+    apiMock.getProxyLogsMeta
+      .mockResolvedValueOnce({
+        summary: buildListResponse().summary,
+        clientOptions: buildListResponse().clientOptions,
+        sites: [
+          { id: 1, name: 'main-site', status: 'active' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        summary: {
+          totalCount: 0,
+          successCount: 0,
+          failedCount: 0,
+          totalCost: 0,
+          totalTokensAll: 0,
+        },
+        clientOptions: [],
+        sites: [
+          { id: 1, name: 'main-site', status: 'active' },
+        ],
+      });
+    apiMock.getProxyDebugTraces
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 701,
+            createdAt: '2026-03-28 18:00:00',
+            requestedModel: 'gpt-4o',
+            downstreamPath: '/v1/responses',
+            finalStatus: 'failed',
+            finalUpstreamPath: '/responses',
+            clientKind: 'codex',
+            sessionId: 'sess-debug-1',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ items: [] });
+
+    let root!: WebTestRenderer;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const clearButton = root!.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && collectText(node).trim() === '清除日志'
+      ));
+
+      await act(async () => {
+        clearButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(confirmMock).toHaveBeenCalledWith(
+        expect.stringContaining('已聚合的费用统计'),
+      );
+      expect(apiMock.clearProxyLogs).toHaveBeenCalledTimes(1);
+      expect(apiMock.getProxyLogs).toHaveBeenCalledTimes(2);
+      expect(apiMock.getProxyLogsMeta).toHaveBeenLastCalledWith({
+        status: 'all',
+        search: '',
+        refresh: 1,
+      });
+      expect(apiMock.getProxyDebugTraces).toHaveBeenCalledTimes(2);
+      expect(collectText(root.root)).toContain('最近追踪0 条');
+      expect(collectText(root.root)).toContain('使用日志已清除（明细 1 条，调试 1 条）');
+    } finally {
+      root?.unmount();
+      Reflect.deleteProperty(globalThis, 'confirm');
     }
   });
 

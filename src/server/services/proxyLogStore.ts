@@ -88,6 +88,10 @@ export function getProxyLogBaseSelectFields() {
   return buildProxyLogCoreSelectFields();
 }
 
+export async function clearProxyLogRecords(): Promise<number> {
+  return (await db.delete(schema.proxyLogs).run()).changes;
+}
+
 export type ProxyLogSelectFields = ReturnType<typeof buildProxyLogSelectFields>;
 
 export type ResolvedProxyLogSelectFields = {

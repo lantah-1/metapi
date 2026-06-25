@@ -92,7 +92,7 @@ describe('downstreamApiKeyService', () => {
     expect(r4.ok).toBe(false);
   });
 
-  it('parses policy fields and supports model matching patterns', async () => {
+  it('treats legacy policy fields as compatibility-only metadata', async () => {
     const row = await db.insert(schema.downstreamApiKeys).values({
       name: 'project-a',
       key: 'sk-project-a',
@@ -107,13 +107,29 @@ describe('downstreamApiKeyService', () => {
     if (!result.ok) return;
 
     expect(result.key?.id).toBe(row.id);
-    expect(result.policy.allowedRouteIds).toEqual([101, 102]);
-    expect(result.policy.siteWeightMultipliers[1]).toBeCloseTo(2.5);
-    expect(result.policy.siteWeightMultipliers[7]).toBeCloseTo(0.4);
-
+    expect(result.policy.allowedRouteIds).toEqual([]);
+    expect(result.policy.supportedModels).toEqual([]);
+    expect(result.policy.siteWeightMultipliers).toEqual({});
     expect(service.isModelAllowedByPolicy('claude-opus-4-6', result.policy)).toBe(true);
     expect(service.isModelAllowedByPolicy('gpt-4o-mini', result.policy)).toBe(true);
-    expect(service.isModelAllowedByPolicy('gemini-2.0-flash', result.policy)).toBe(false);
+    expect(service.isModelAllowedByPolicy('gemini-2.0-flash', result.policy)).toBe(true);
+  });
+
+  it('treats managed keys without model selections as unrestricted by policy', async () => {
+    const row = await db.insert(schema.downstreamApiKeys).values({
+      name: 'project-open',
+      key: 'sk-project-open',
+      enabled: true,
+    }).returning().get();
+
+    const result = await service.authorizeDownstreamToken(row.key);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.policy.supportedModels).toEqual([]);
+    expect(result.policy.allowedRouteIds).toEqual([]);
+    expect(result.policy.denyAllWhenEmpty).toBeUndefined();
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('gpt-5.5', result.policy)).toBe(true);
   });
 
   it('keeps all explicitly selected supported models when list exceeds 200 items', () => {
@@ -122,7 +138,7 @@ describe('downstreamApiKeyService', () => {
     expect(service.normalizeSupportedModelsInput(selectedModels)).toEqual(selectedModels);
   });
 
-  it('treats selected groups as additional allowed exposed route scope (union semantics)', async () => {
+  it('does not let legacy route selections restrict model authorization', async () => {
     const claudeGroup = await db.insert(schema.tokenRoutes).values({
       modelPattern: 're:^claude-(opus|sonnet)-4-6$',
       displayName: 'claude-4-6-group',
@@ -135,14 +151,14 @@ describe('downstreamApiKeyService', () => {
       siteWeightMultipliers: {},
     };
 
-    expect(service.isModelAllowedByPolicy('claude-4-6-group', policy)).toBe(false);
+    expect(service.isModelAllowedByPolicy('claude-4-6-group', policy)).toBe(true);
     expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-4-6-group', policy)).toBe(true);
-    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(false);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(true);
     expect(await service.isModelAllowedByPolicyOrAllowedRoutes('gpt-4o-mini', policy)).toBe(true);
-    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('gemini-2.0-flash', policy)).toBe(false);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('gemini-2.0-flash', policy)).toBe(true);
   });
 
-  it('denies all models when both supportedModels and allowedRouteIds are empty', async () => {
+  it('keeps empty legacy policy unrestricted', async () => {
     const policy = {
       supportedModels: [],
       allowedRouteIds: [],
@@ -150,43 +166,8 @@ describe('downstreamApiKeyService', () => {
       denyAllWhenEmpty: true,
     };
 
-    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('gpt-4o-mini', policy)).toBe(false);
-    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(false);
-  });
-
-  it('authorizes by selected group model pattern only, not arbitrary internal models', async () => {
-    const virtualModelGroup = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'claude-opus-4-6',
-      enabled: true,
-    }).returning().get();
-
-    const policy = {
-      supportedModels: [],
-      allowedRouteIds: [virtualModelGroup.id],
-      siteWeightMultipliers: {},
-    };
-
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('gpt-4o-mini', policy)).toBe(true);
     expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(true);
-    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-sonnet-4-6', policy)).toBe(false);
-  });
-
-  it('only authorizes selected route display name alias, not models covered by group pattern', async () => {
-    const aliasRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 're:^claude-(opus|sonnet)-4-5$',
-      displayName: 'claude-opus-4-6',
-      enabled: true,
-    }).returning().get();
-
-    const policy = {
-      supportedModels: [],
-      allowedRouteIds: [aliasRoute.id],
-      siteWeightMultipliers: {},
-    };
-
-    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(true);
-    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-sonnet-4-5', policy)).toBe(false);
-    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-5', policy)).toBe(false);
-    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('gpt-4o-mini', policy)).toBe(false);
   });
 
   it('accumulates managed key request/cost usage and applies limits', async () => {

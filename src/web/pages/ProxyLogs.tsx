@@ -764,6 +764,7 @@ export default function ProxyLogs() {
   const [summary, setSummary] = useState<ProxyLogsSummary>(EMPTY_SUMMARY);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [clearingProxyLogs, setClearingProxyLogs] = useState(false);
   const [statusFilter, setStatusFilter] = useState<ProxyLogStatusFilter>(
     initialRouteState.status,
   );
@@ -1370,6 +1371,44 @@ export default function ProxyLogs() {
     },
     [expanded, loadDetail],
   );
+  const handleClearProxyLogs = useCallback(async () => {
+    const confirmed =
+      typeof globalThis.confirm !== "function" ||
+      globalThis.confirm(
+        "确认清除使用日志明细？已聚合的费用统计、趋势和占用数据不会被清除。",
+      );
+    if (!confirmed) return;
+
+    setClearingProxyLogs(true);
+    try {
+      const res = await api.clearProxyLogs();
+      setExpanded(null);
+      setDetailById({});
+      setLogs([]);
+      setTotal(0);
+      setSummary(EMPTY_SUMMARY);
+      setPage(1);
+      setDebugTraces([]);
+      setDebugTracePage(1);
+      selectedDebugTraceIdRef.current = null;
+      setSelectedDebugTraceId(null);
+      setShowDebugTraceDetailModal(false);
+      setDebugDetailById({});
+      debugDetailInFlightRef.current.clear();
+      await Promise.all([
+        load(),
+        loadMeta(true),
+        loadDebugTraceList({ silent: true, suppressToast: true }),
+      ]);
+      toast.success(
+        `使用日志已清除（明细 ${res.deletedProxyLogs || 0} 条，调试 ${res.deletedDebugTraces || 0} 条）`,
+      );
+    } catch (error: any) {
+      toast.error(error?.message || "清除使用日志失败");
+    } finally {
+      setClearingProxyLogs(false);
+    }
+  }, [load, loadDebugTraceList, loadMeta, toast]);
   const selectedDebugTraceDetail = selectedDebugTraceId
     ? debugDetailById[selectedDebugTraceId]
     : undefined;
@@ -2097,6 +2136,35 @@ export default function ProxyLogs() {
               />
             </svg>
             {loading ? "加载中..." : "刷新"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleClearProxyLogs()}
+            disabled={clearingProxyLogs}
+            className="btn btn-danger"
+            title="仅清除使用日志明细，保留已聚合的费用统计"
+            style={{
+              padding: "6px 14px",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <svg
+              width="14"
+              height="14"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M6 7h12m-9 0V5a1 1 0 011-1h4a1 1 0 011 1v2m-7 4v6m4-6v6m-7-10l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12"
+              />
+            </svg>
+            {clearingProxyLogs ? "清除中..." : "清除日志"}
           </button>
         </div>
       </div>

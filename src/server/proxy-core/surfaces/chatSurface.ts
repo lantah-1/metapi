@@ -66,6 +66,7 @@ import {
   recordSurfaceSuccess,
   selectSurfaceChannelForAttempt,
   trySurfaceOauthRefreshRecovery,
+  withSelectedRouteCustomHeaders,
 } from './sharedSurface.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
 import {
@@ -381,13 +382,13 @@ export async function handleChatSurfaceRequest(
           providerHeaders: buildProviderHeaders(),
           codexSessionCacheKey,
         });
-        return {
+        return withSelectedRouteCustomHeaders(selected, {
           endpoint,
           path: endpointRequest.path,
           headers: endpointRequest.headers,
           body: endpointRequest.body as Record<string, unknown>,
           runtime: endpointRequest.runtime,
-        };
+        });
       };
       const dispatchRequest = createSurfaceDispatchRequest({
         site: selected.site,
@@ -1316,13 +1317,13 @@ export async function handleClaudeCountTokensSurfaceRequest(
         claudeBody: rawBody,
         downstreamHeaders: request.headers as Record<string, unknown>,
       });
-      return {
+      return withSelectedRouteCustomHeaders(selected, {
         endpoint: 'messages' as const,
         path: upstreamRequest.path,
         headers: upstreamRequest.headers,
         body: upstreamRequest.body,
         runtime: upstreamRequest.runtime,
-      };
+      });
     };
 
     try {

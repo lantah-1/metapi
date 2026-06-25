@@ -48,11 +48,6 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const systemProxyUrl = parseSettingFromMap<string>(settingsMap, 'system_proxy_url');
   if (typeof systemProxyUrl === 'string') config.systemProxyUrl = systemProxyUrl;
 
-  const modelAvailabilityProbeEnabled = parseSettingFromMap<boolean>(settingsMap, 'model_availability_probe_enabled');
-  if (typeof modelAvailabilityProbeEnabled === 'boolean') {
-    config.modelAvailabilityProbeEnabled = modelAvailabilityProbeEnabled;
-  }
-
   const codexUpstreamWebsocketEnabled = parseSettingFromMap<boolean>(settingsMap, 'codex_upstream_websocket_enabled');
   if (typeof codexUpstreamWebsocketEnabled === 'boolean') {
     config.codexUpstreamWebsocketEnabled = codexUpstreamWebsocketEnabled;
@@ -76,16 +71,6 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const proxyEmptyContentFailEnabled = parseSettingFromMap<boolean>(settingsMap, 'proxy_empty_content_fail_enabled');
   if (typeof proxyEmptyContentFailEnabled === 'boolean') {
     config.proxyEmptyContentFailEnabled = proxyEmptyContentFailEnabled;
-  }
-
-  const globalBlockedBrands = parseSettingFromMap<string[]>(settingsMap, 'global_blocked_brands');
-  if (Array.isArray(globalBlockedBrands)) {
-    config.globalBlockedBrands = globalBlockedBrands.filter((b): b is string => typeof b === 'string').map((b) => b.trim()).filter(Boolean);
-  }
-
-  const globalAllowedModels = parseSettingFromMap<string[] | string>(settingsMap, 'global_allowed_models');
-  if (globalAllowedModels !== undefined) {
-    config.globalAllowedModels = toStringList(globalAllowedModels);
   }
 
   const codexHeaderDefaults = parseSettingFromMap<unknown>(settingsMap, 'codex_header_defaults');

@@ -1,5 +1,6 @@
 export declare const ROUTE_DECISION_REFRESH_TASK_TYPE = "route-decision.refresh";
-export type RouteMode = 'pattern' | 'explicit_group';
+export declare const SWITCH_GROUP_ACTIVE_SOURCE_ROUTE_ID_KEY = "activeSourceRouteId";
+export type RouteMode = 'pattern' | 'explicit_group' | 'switch_group';
 export type RouteDecisionCandidate = {
     channelId: number;
     accountId: number;
@@ -24,3 +25,8 @@ export type RouteDecision = {
     candidates: RouteDecisionCandidate[];
 };
 export declare function normalizeTokenRouteMode(routeMode: unknown): RouteMode;
+export declare function getSwitchGroupActiveSourceRouteId(modelMapping?: string | Record<string, unknown> | null): number | null;
+export declare function serializeSwitchGroupModelMapping(
+  modelMapping: string | Record<string, unknown> | null | undefined,
+  activeSourceRouteId: number | null | undefined,
+): string;

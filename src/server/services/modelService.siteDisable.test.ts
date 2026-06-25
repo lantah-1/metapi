@@ -2,12 +2,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 type DbModule = typeof import('../db/index.js');
 type ModelServiceModule = typeof import('./modelService.js');
 
-describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
+describe('rebuildTokenRoutesFromAvailability with legacy site disabled models', () => {
     let db: DbModule['db'];
     let schema: DbModule['schema'];
     let rebuildTokenRoutesFromAvailability: ModelServiceModule['rebuildTokenRoutesFromAvailability'];
@@ -41,7 +41,7 @@ describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
         delete process.env.DATA_DIR;
     });
 
-    it('does not create route/channel for a model disabled on its site', async () => {
+    it('ignores legacy site disabled model rows when rebuilding routes', async () => {
         const site = await db.insert(schema.sites).values({
             name: 'site-a',
             url: 'https://site-a.example.com',
@@ -65,7 +65,6 @@ describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
             checkedAt: '2026-03-12T00:00:00.000Z',
         }).run();
 
-        // Disable gpt-4o for this site
         await db.insert(schema.siteDisabledModels).values({
             siteId: site.id,
             modelName: 'gpt-4o',
@@ -73,15 +72,15 @@ describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
 
         const rebuild = await rebuildTokenRoutesFromAvailability();
 
-        expect(rebuild.models).toBe(0);
+        expect(rebuild.models).toBe(1);
 
         const routes = await db.select().from(schema.tokenRoutes)
             .where(eq(schema.tokenRoutes.modelPattern, 'gpt-4o'))
             .all();
-        expect(routes).toHaveLength(0);
+        expect(routes).toHaveLength(1);
     });
 
-    it('only blocks the disabled site, not other sites providing the same model', async () => {
+    it('keeps channels for every active site even when legacy disabled rows exist', async () => {
         const siteA = await db.insert(schema.sites).values({
             name: 'site-a',
             url: 'https://site-a.example.com',
@@ -118,7 +117,6 @@ describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
             { accountId: accountB.id, modelName: 'claude-sonnet-4-5-20250929', available: true, latencyMs: 400 },
         ]).run();
 
-        // Disable the model only on site A
         await db.insert(schema.siteDisabledModels).values({
             siteId: siteA.id,
             modelName: 'claude-sonnet-4-5-20250929',
@@ -137,9 +135,8 @@ describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
             .where(eq(schema.routeChannels.routeId, route!.id))
             .all();
 
-        // Only site B's channel should exist
-        expect(channels).toHaveLength(1);
-        expect(channels[0]?.accountId).toBe(accountB.id);
+        expect(channels).toHaveLength(2);
+        expect(channels.map((channel) => channel.accountId).sort((a, b) => a - b)).toEqual([accountA.id, accountB.id].sort((a, b) => a - b));
     });
 
     it('allows model when no disabled models are configured', async () => {

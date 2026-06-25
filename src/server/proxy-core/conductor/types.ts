@@ -5,6 +5,9 @@ export type SelectedChannelLike = {
   tokenName?: string;
   tokenValue?: string;
   actualModel?: string;
+  routeCustomHeaders?: unknown;
+  routeHeaderTemplateId?: number | null;
+  routeHeaderTemplateHeaders?: unknown;
 };
 
 export type AttemptSuccess = {

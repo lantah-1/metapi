@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { eq } from 'drizzle-orm';
 
 type DbModule = typeof import('../db/index.js');
 type TokenRouterModule = typeof import('./tokenRouter.js');
@@ -98,11 +99,41 @@ describe('TokenRouter patterns and model mapping', () => {
   async function createExplicitGroupRoute(
     displayName: string,
     sourceRouteIds: number[],
+    options?: {
+      customHeaderTemplateId?: number | null;
+      customHeaders?: string | null;
+    },
   ) {
     const route = await db.insert(schema.tokenRoutes).values({
       modelPattern: displayName,
       displayName,
       routeMode: 'explicit_group',
+      customHeaderTemplateId: options?.customHeaderTemplateId ?? null,
+      customHeaders: options?.customHeaders ?? null,
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeGroupSources).values(
+      sourceRouteIds.map((sourceRouteId) => ({
+        groupRouteId: route.id,
+        sourceRouteId,
+      })),
+    ).run();
+
+    return route;
+  }
+
+  async function createSwitchGroupRoute(
+    displayName: string,
+    sourceRouteIds: number[],
+    activeSourceRouteId: number,
+  ) {
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: displayName,
+      displayName,
+      routeMode: 'switch_group',
+      modelMapping: JSON.stringify({ activeSourceRouteId }),
+      routingStrategy: 'stable_first',
       enabled: true,
     }).returning().get();
 
@@ -231,5 +262,60 @@ describe('TokenRouter patterns and model mapping', () => {
     expect(decision.actualModel).toBe('claude-opus-4-5');
     expect(decision.summary).toContain('按显示名命中：claude-test-4.6-sonnet');
     expect(decision.summary).toContain('实际转发模型：claude-opus-4-5');
+  });
+
+  it('carries explicit-group custom headers and template headers into the selected channel', async () => {
+    const source = await createRouteWithSingleChannel('gpt-5.5');
+    const template = await db.insert(schema.routeHeaderTemplates).values({
+      name: 'Codex Header',
+      headers: JSON.stringify({ 'x-template': 'codex' }),
+    }).returning().get();
+    await createExplicitGroupRoute('gpt-5.5-public', [source.route.id], {
+      customHeaderTemplateId: template.id,
+      customHeaders: JSON.stringify({ 'x-group': 'gpt' }),
+    });
+    const router = new TokenRouter();
+
+    const selected = await router.selectChannel('gpt-5.5-public');
+
+    expect(selected).toBeTruthy();
+    expect(selected?.routeHeaderTemplateId).toBe(template.id);
+    expect(selected?.routeHeaderTemplateHeaders).toBe(JSON.stringify({ 'x-template': 'codex' }));
+    expect(selected?.routeCustomHeaders).toBe(JSON.stringify({ 'x-group': 'gpt' }));
+  });
+
+  it('routes a switch group through the active group or source target', async () => {
+    const gptSource = await createRouteWithSingleChannel('openai/gpt-5.5', undefined, {
+      sourceModel: 'openai/gpt-5.5',
+    });
+    const claudeSource = await createRouteWithSingleChannel('anthropic/claude-sonnet', undefined, {
+      sourceModel: 'anthropic/claude-sonnet',
+    });
+    const gptGroup = await createExplicitGroupRoute('gpt-5.5', [gptSource.route.id]);
+    const switchGroup = await createSwitchGroupRoute(
+      'custom',
+      [gptGroup.id, claudeSource.route.id],
+      gptGroup.id,
+    );
+    const router = new TokenRouter();
+
+    const initial = await router.selectChannel('custom');
+    expect(initial).toBeTruthy();
+    expect(initial?.channel.routeId).toBe(gptSource.route.id);
+    expect(initial?.actualModel).toBe('openai/gpt-5.5');
+    await expect(router.getAvailableModels()).resolves.toEqual(expect.arrayContaining(['custom', 'gpt-5.5']));
+
+    await db.update(schema.tokenRoutes).set({
+      modelMapping: JSON.stringify({ activeSourceRouteId: claudeSource.route.id }),
+    }).where(eq(schema.tokenRoutes.id, switchGroup.id)).run();
+    invalidateTokenRouterCache();
+
+    const switched = await router.selectChannel('custom');
+    const decision = await router.explainSelection('custom');
+    expect(switched).toBeTruthy();
+    expect(switched?.channel.routeId).toBe(claudeSource.route.id);
+    expect(switched?.actualModel).toBe('anthropic/claude-sonnet');
+    expect(decision.routeId).toBe(switchGroup.id);
+    expect(decision.actualModel).toBe('anthropic/claude-sonnet');
   });
 });

@@ -6,23 +6,16 @@ import { detectSite } from '../../services/siteDetector.js';
 import { invalidateSiteProxyCache, parseSiteProxyUrlInput } from '../../services/siteProxy.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { invalidateTokenRouterCache } from '../../services/tokenRouter.js';
-import { parseSiteCustomHeadersInput } from '../../services/siteCustomHeaders.js';
 import { getSub2ApiSubscriptionFromExtraConfig } from '../../services/accountExtraConfig.js';
 import {
   parseSiteBatchPayload,
   parseSiteCreatePayload,
   parseSiteDetectPayload,
-  parseSiteDisabledModelsPayload,
   parseSiteUpdatePayload,
 } from '../../contracts/siteRoutePayloads.js';
 import { getSiteInitializationPreset } from '../../../shared/siteInitializationPresets.js';
 import { normalizeSiteApiEndpointBaseUrl } from '../../services/siteApiEndpointService.js';
 import { analyzePrimarySiteUrl } from '../../../shared/sitePrimaryUrl.js';
-import { probeSiteModels } from '../../services/modelService.js';
-
-function sseWrite(raw: import('http').ServerResponse, event: string, data: unknown) {
-  try { raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* ignore */ }
-}
 
 function normalizeSiteStatus(input: unknown): 'active' | 'disabled' | null {
   if (input === undefined || input === null) return null;
@@ -260,11 +253,17 @@ async function attachSiteApiEndpoints<T extends { id: number }>(siteRows: T[]) {
   }));
 }
 
+function omitSiteCustomHeaders<T extends object>(site: T): Omit<T, 'customHeaders'> {
+  const siteRecord = { ...(site as Record<string, unknown>) };
+  delete siteRecord.customHeaders;
+  return siteRecord as Omit<T, 'customHeaders'>;
+}
+
 async function loadSiteWithApiEndpoints(siteId: number) {
   const site = await db.select().from(schema.sites).where(eq(schema.sites.id, siteId)).get();
   if (!site) return null;
   const [hydrated] = await attachSiteApiEndpoints([site]);
-  return hydrated || null;
+  return hydrated ? omitSiteCustomHeaders(hydrated) : null;
 }
 
 function getErrorChain(error: unknown): ErrorLike[] {
@@ -451,7 +450,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     }
 
     return siteRowsWithApiEndpoints.map((site) => ({
-      ...site,
+      ...omitSiteCustomHeaders(site),
       totalBalance: Math.round((totalBalanceBySiteId[site.id] || 0) * 1_000_000) / 1_000_000,
       subscriptionSummary: subscriptionBySiteId[site.id] || null,
     }));
@@ -471,7 +470,6 @@ export async function sitesRoutes(app: FastifyInstance) {
       initializationPresetId,
       proxyUrl,
       useSystemProxy,
-      customHeaders,
       externalCheckinUrl,
       status,
       isPinned,
@@ -506,10 +504,6 @@ export async function sitesRoutes(app: FastifyInstance) {
     const normalizedGlobalWeight = normalizeGlobalWeight(globalWeight);
     if (globalWeight !== undefined && normalizedGlobalWeight === null) {
       return reply.code(400).send({ error: 'Invalid globalWeight value. Expected a positive number.' });
-    }
-    const normalizedCustomHeaders = parseSiteCustomHeadersInput(customHeaders);
-    if (!normalizedCustomHeaders.valid) {
-      return reply.code(400).send({ error: normalizedCustomHeaders.error || 'Invalid customHeaders.' });
     }
     const explicitInitializationPreset = initializationPresetId == null || initializationPresetId === ''
       ? null
@@ -559,7 +553,6 @@ export async function sitesRoutes(app: FastifyInstance) {
           platform: detectedPlatform,
           proxyUrl: normalizedProxyUrl.proxyUrl,
           useSystemProxy: normalizedUseSystemProxy ?? false,
-          customHeaders: normalizedCustomHeaders.customHeaders,
           externalCheckinUrl: normalizedExternalCheckinUrl.url,
           status: normalizedStatus ?? 'active',
           isPinned: normalizedPinned ?? false,
@@ -647,10 +640,6 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.globalWeight !== undefined && normalizedGlobalWeight === null) {
       return reply.code(400).send({ error: 'Invalid globalWeight value. Expected a positive number.' });
     }
-    const normalizedCustomHeaders = parseSiteCustomHeadersInput(body.customHeaders);
-    if (!normalizedCustomHeaders.valid) {
-      return reply.code(400).send({ error: normalizedCustomHeaders.error || 'Invalid customHeaders.' });
-    }
     const normalizedApiEndpoints = normalizeSiteApiEndpointsInput(body.apiEndpoints);
     if (!normalizedApiEndpoints.valid) {
       return reply.code(400).send({ error: normalizedApiEndpoints.error || 'Invalid apiEndpoints.' });
@@ -682,20 +671,11 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.platform !== undefined) updates.platform = nextPlatform;
     if (normalizedProxyUrl.present) updates.proxyUrl = normalizedProxyUrl.proxyUrl;
     if (body.useSystemProxy !== undefined) updates.useSystemProxy = normalizedUseSystemProxy;
-    if (normalizedCustomHeaders.present) updates.customHeaders = normalizedCustomHeaders.customHeaders;
     if (normalizedExternalCheckinUrl.present) updates.externalCheckinUrl = normalizedExternalCheckinUrl.url;
     if (body.status !== undefined) updates.status = normalizedStatus;
     if (body.isPinned !== undefined) updates.isPinned = normalizedPinned;
     if (body.sortOrder !== undefined) updates.sortOrder = normalizedSortOrder;
     if (body.globalWeight !== undefined) updates.globalWeight = normalizedGlobalWeight;
-    const anyBody = body as Record<string, unknown>;
-    if (anyBody.postRefreshProbeEnabled !== undefined) updates.postRefreshProbeEnabled = anyBody.postRefreshProbeEnabled === true || anyBody.postRefreshProbeEnabled === 1;
-    if (anyBody.postRefreshProbeModel !== undefined) updates.postRefreshProbeModel = String(anyBody.postRefreshProbeModel || '').trim();
-    if (anyBody.postRefreshProbeScope !== undefined) updates.postRefreshProbeScope = anyBody.postRefreshProbeScope === 'all' ? 'all' : 'single';
-    if (anyBody.postRefreshProbeLatencyThresholdMs !== undefined) {
-      const ms = Number(anyBody.postRefreshProbeLatencyThresholdMs);
-      updates.postRefreshProbeLatencyThresholdMs = Number.isFinite(ms) && ms >= 0 ? Math.trunc(ms) : 0;
-    }
     updates.updatedAt = new Date().toISOString();
     try {
       await db.transaction(async (tx) => {
@@ -799,166 +779,6 @@ export async function sitesRoutes(app: FastifyInstance) {
       failedItems,
     };
   });
-
-  // Get disabled models for a site
-  app.get<{ Params: { id: string } }>('/api/sites/:id/disabled-models', async (request, reply) => {
-    const id = parseInt(request.params.id);
-    if (Number.isNaN(id)) {
-      return reply.code(400).send({ error: 'Invalid site id' });
-    }
-    const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
-    if (!existingSite) {
-      return reply.code(404).send({ error: 'Site not found' });
-    }
-    const rows = await db.select({ modelName: schema.siteDisabledModels.modelName })
-      .from(schema.siteDisabledModels)
-      .where(eq(schema.siteDisabledModels.siteId, id))
-      .all();
-    return { siteId: id, models: rows.map((r) => r.modelName) };
-  });
-
-  // Update disabled models for a site (full replace)
-  app.put<{ Params: { id: string }; Body: unknown }>('/api/sites/:id/disabled-models', async (request, reply) => {
-    const parsedBody = parseSiteDisabledModelsPayload(request.body);
-    if (!parsedBody.success) {
-      return reply.code(400).send({ error: parsedBody.error });
-    }
-
-    const id = parseInt(request.params.id);
-    if (Number.isNaN(id)) {
-      return reply.code(400).send({ error: 'Invalid site id' });
-    }
-    const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
-    if (!existingSite) {
-      return reply.code(404).send({ error: 'Site not found' });
-    }
-    const rawModels = parsedBody.data.models;
-    if (!Array.isArray(rawModels)) {
-      return reply.code(400).send({ error: 'models must be an array of strings' });
-    }
-    const models = rawModels
-      .filter((m): m is string => typeof m === 'string')
-      .map((m) => m.trim())
-      .filter((m) => m.length > 0);
-    const uniqueModels = Array.from(new Set(models));
-
-    await db.delete(schema.siteDisabledModels)
-      .where(eq(schema.siteDisabledModels.siteId, id))
-      .run();
-
-    if (uniqueModels.length > 0) {
-      await db.insert(schema.siteDisabledModels).values(
-        uniqueModels.map((modelName) => ({ siteId: id, modelName })),
-      ).run();
-    }
-
-    invalidateSiteCaches();
-    return { siteId: id, models: uniqueModels };
-  });
-
-  // Get all discovered models for a site (from model_availability and token_model_availability)
-  app.get<{ Params: { id: string } }>('/api/sites/:id/available-models', async (request, reply) => {
-    const id = parseInt(request.params.id);
-    if (Number.isNaN(id)) {
-      return reply.code(400).send({ error: 'Invalid site id' });
-    }
-    const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
-    if (!existingSite) {
-      return reply.code(404).send({ error: 'Site not found' });
-    }
-
-    // Get models from model_availability (account-level)
-    const accountModels = await db.select({ modelName: schema.modelAvailability.modelName })
-      .from(schema.modelAvailability)
-      .innerJoin(schema.accounts, eq(schema.modelAvailability.accountId, schema.accounts.id))
-      .where(
-        and(
-          eq(schema.accounts.siteId, id),
-          eq(schema.modelAvailability.available, true),
-        ),
-      )
-      .all();
-
-    // Get models from token_model_availability (token-level)
-    const tokenModels = await db.select({ modelName: schema.tokenModelAvailability.modelName })
-      .from(schema.tokenModelAvailability)
-      .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
-      .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
-      .where(
-        and(
-          eq(schema.accounts.siteId, id),
-          eq(schema.tokenModelAvailability.available, true),
-        ),
-      )
-      .all();
-
-    const models = Array.from(new Set([
-      ...accountModels.map((r) => r.modelName.trim()),
-      ...tokenModels.map((r) => r.modelName.trim()),
-    ])).filter((m) => m.length > 0).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-
-    return { siteId: id, models };
-  });
-
-  // Manually probe site models now (one-shot JSON)
-  app.post<{ Params: { id: string }; Body: unknown }>('/api/sites/:id/probe-now', async (request, reply) => {
-    const id = parseInt(request.params.id);
-    if (Number.isNaN(id)) {
-      return reply.code(400).send({ error: 'Invalid site id' });
-    }
-    const body = request.body as Record<string, unknown> | null;
-    const scope = body?.scope === 'all' ? 'all' : body?.scope === 'single' ? 'single' : undefined;
-    const modelName = typeof body?.modelName === 'string' ? body.modelName.trim() : undefined;
-    const parsedThresholdBody = Number(body?.latencyThresholdMs ?? 0);
-    const latencyThresholdMsBody = Number.isFinite(parsedThresholdBody) && parsedThresholdBody > 0 ? Math.trunc(parsedThresholdBody) : undefined;
-    const result = await probeSiteModels(id, { scope, modelName, latencyThresholdMs: latencyThresholdMsBody });
-    if (!result.success) {
-      return reply.code(422).send({ error: result.error });
-    }
-    return result;
-  });
-
-  // Streaming probe via SSE
-  app.get<{ Params: { id: string }; Querystring: { scope?: string; modelName?: string; latencyThresholdMs?: string } }>(
-    '/api/sites/:id/probe-stream',
-    async (request, reply) => {
-      reply.hijack();
-      reply.raw.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-      });
-
-      const id = parseInt(request.params.id);
-      if (Number.isNaN(id)) {
-        sseWrite(reply.raw, 'error', { message: 'Invalid site id' });
-        reply.raw.end();
-        return;
-      }
-
-      const q = request.query;
-      const scope = q.scope === 'all' ? 'all' : q.scope === 'single' ? 'single' : undefined;
-      const modelName = q.modelName?.trim() || undefined;
-      const parsedThreshold = parseInt(q.latencyThresholdMs ?? '', 10);
-      const latencyThresholdMs = Number.isFinite(parsedThreshold) && parsedThreshold > 0 ? parsedThreshold : undefined;
-
-      // Propagate client disconnect to the probe worker pool
-      const probeAbort = new AbortController();
-      reply.raw.on('close', () => probeAbort.abort());
-
-      try {
-        const result = await probeSiteModels(id, { scope, modelName, latencyThresholdMs, signal: probeAbort.signal }, (ev) => {
-          sseWrite(reply.raw, ev.type, ev);
-        });
-        if (!probeAbort.signal.aborted) {
-          sseWrite(reply.raw, 'complete', result);
-        }
-      } catch (err: any) {
-        sseWrite(reply.raw, 'error', { message: err?.message || '探测失败' });
-      }
-      reply.raw.end();
-    },
-  );
 
   // Detect platform for a URL
   app.post<{ Body: unknown }>('/api/sites/detect', async (request, reply) => {

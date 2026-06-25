@@ -47,11 +47,13 @@ export type RouteChannel = {
     accessToken?: string | null;
     extraConfig?: string | null;
     credentialMode?: string | null;
+    status?: string | null;
   };
   site?: {
     id: number;
     name: string | null;
     platform: string | null;
+    status?: string | null;
   };
   token?: {
     id: number;
@@ -59,6 +61,7 @@ export type RouteChannel = {
     accountId: number;
     enabled: boolean;
     isDefault: boolean;
+    valueStatus?: string | null;
   } | null;
   oauthRouteUnitId?: number | null;
   routeUnit?: RouteChannelRouteUnit | null;
@@ -71,7 +74,10 @@ export type RouteRow = {
   displayIcon?: string | null;
   routeMode?: RouteMode | null;
   sourceRouteIds?: number[];
+  activeSourceRouteId?: number | null;
   modelMapping?: string | null;
+  customHeaderTemplateId?: number | null;
+  customHeaders?: string | null;
   routingStrategy?: RouteRoutingStrategy | null;
   decisionSnapshot?: RouteDecision | null;
   decisionRefreshedAt?: string | null;
@@ -86,17 +92,34 @@ export type RouteSummaryRow = {
   displayIcon: string | null;
   routeMode?: RouteMode | null;
   sourceRouteIds?: number[];
+  activeSourceRouteId?: number | null;
   modelMapping: string | null;
+  customHeaderTemplateId?: number | null;
+  customHeaders?: string | null;
   routingStrategy?: RouteRoutingStrategy | null;
   enabled: boolean;
   channelCount: number;
   enabledChannelCount: number;
   siteNames: string[];
+  siteStatuses?: Array<{
+    id?: number | null;
+    name: string;
+    status: string;
+  }>;
   decisionSnapshot: RouteDecision | null;
   decisionRefreshedAt: string | null;
   kind?: RouteRowKind;
   readOnly?: boolean;
   isVirtual?: boolean;
+};
+
+export type RouteHeaderTemplate = {
+  id: number;
+  name: string;
+  description?: string | null;
+  headers: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
 };
 
 export type ChannelDecisionState = {

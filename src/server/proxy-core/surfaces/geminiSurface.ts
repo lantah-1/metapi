@@ -1,9 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { TextDecoder } from 'node:util';
 import { fetch } from 'undici';
-import { and, eq } from 'drizzle-orm';
 import { config } from '../../config.js';
-import { db, schema } from '../../db/index.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { isModelAllowedByPolicyOrAllowedRoutes } from '../../services/downstreamApiKeyService.js';
@@ -61,6 +59,7 @@ import {
   canRetryChannelSelection,
   getTesterForcedChannelId,
 } from '../channelSelection.js';
+import { withSelectedRouteCustomHeaders } from './sharedSurface.js';
 const GEMINI_MODEL_PROBES = [
   'gemini-2.5-flash',
   'gemini-2.0-flash',
@@ -162,9 +161,8 @@ function resolveUpstreamPath(apiVersion: string, modelActionPath: string): strin
 }
 
 function hasDownstreamModelRestrictions(policy: { supportedModels?: unknown; allowedRouteIds?: unknown; denyAllWhenEmpty?: unknown }): boolean {
-  const supportedModels = Array.isArray(policy.supportedModels) ? policy.supportedModels : [];
-  const allowedRouteIds = Array.isArray(policy.allowedRouteIds) ? policy.allowedRouteIds : [];
-  return supportedModels.length > 0 || allowedRouteIds.length > 0 || policy.denyAllWhenEmpty === true;
+  void policy;
+  return false;
 }
 
 function extractGeminiListedModelName(item: unknown): string {
@@ -207,24 +205,10 @@ async function filterGeminiListedModelsForPolicy(
 
 async function readRouteAwareGeminiModels(request: FastifyRequest): Promise<Array<{ name: string; displayName: string }>> {
   const policy = getDownstreamRoutingPolicy(request);
-  const rows = await db.select({ modelName: schema.modelAvailability.modelName })
-    .from(schema.modelAvailability)
-    .innerJoin(schema.accounts, eq(schema.modelAvailability.accountId, schema.accounts.id))
-    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-    .where(and(
-      eq(schema.modelAvailability.available, true),
-      eq(schema.accounts.status, 'active'),
-      eq(schema.sites.status, 'active'),
-    ))
-    .all();
-  const routeAliases = await db.select({ displayName: schema.tokenRoutes.displayName })
-    .from(schema.tokenRoutes)
-    .where(eq(schema.tokenRoutes.enabled, true))
-    .all();
-  const deduped = Array.from(new Set([
-    ...rows.map((row) => String(row.modelName || '').trim()).filter(Boolean),
-    ...routeAliases.map((row) => String(row.displayName || '').trim()).filter(Boolean),
-  ])).sort();
+  const deduped = Array.from(new Set(await tokenRouter.getAvailableModels()))
+    .map((modelName) => String(modelName || '').trim())
+    .filter(Boolean)
+    .sort();
 
   const allowed: Array<{ name: string; displayName: string }> = [];
   for (const modelName of deduped) {
@@ -684,7 +668,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                   })
               )
               : normalizedBody;
-            const requestHeaders = isInternalGemini
+            const baseRequestHeaders = isInternalGemini
               ? {
                 'Content-Type': 'application/json',
                 ...(internalGeminiAction === 'streamGenerateContent' ? { Accept: 'text/event-stream' } : {}),
@@ -697,6 +681,19 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               : {
                 'Content-Type': 'application/json',
               };
+            const requestHeaders = withSelectedRouteCustomHeaders(selected, {
+              endpoint: 'chat',
+              path: upstreamPath,
+              headers: baseRequestHeaders,
+              body: requestBody as Record<string, unknown>,
+              runtime: {
+                executor: isGeminiCli ? 'gemini-cli' : 'default',
+                modelName: actualModel,
+                stream: isStreamAction,
+                oauthProjectId: oauth?.projectId || null,
+                action: internalGeminiAction,
+              },
+            }).headers;
             const targetUrl = isInternalGemini
               ? `${selected.site.url}${upstreamPath}`
               : geminiGenerateContentTransformer.resolveActionUrl(
@@ -1230,13 +1227,13 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               downstreamHeaders: request.headers as Record<string, unknown>,
             }),
           });
-          return {
+          return withSelectedRouteCustomHeaders(selected, {
             endpoint,
             path: endpointRequest.path,
             headers: endpointRequest.headers,
             body: endpointRequest.body as Record<string, unknown>,
             runtime: endpointRequest.runtime,
-          };
+          });
         };
         const channelProxyUrl = resolveChannelProxyUrl(selected.site, selected.account.extraConfig);
         const dispatchRequest = (

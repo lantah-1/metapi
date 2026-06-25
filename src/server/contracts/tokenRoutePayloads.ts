@@ -30,9 +30,13 @@ const tokenRouteCreatePayloadSchema = z.object({
   displayName: z.union([z.string(), z.null()]).optional(),
   displayIcon: z.union([z.string(), z.null()]).optional(),
   modelMapping: z.union([z.string(), z.null()]).optional(),
+  customHeaderTemplateId: z.union([z.number().int().positive(), z.null()]).optional(),
+  customHeaders: z.union([z.string(), z.record(z.string(), z.unknown()), z.null()]).optional(),
   routingStrategy: z.string().optional(),
   enabled: z.boolean().optional(),
   sourceRouteIds: z.array(z.number().int().positive()).optional(),
+  activeSourceRouteId: z.union([z.number().int().positive(), z.null()]).optional(),
+  autoSourceQuery: z.union([z.string(), z.null()]).optional(),
 }).passthrough();
 
 const tokenRouteUpdatePayloadSchema = z.object({
@@ -41,9 +45,13 @@ const tokenRouteUpdatePayloadSchema = z.object({
   displayName: z.union([z.string(), z.null()]).optional(),
   displayIcon: z.union([z.string(), z.null()]).optional(),
   modelMapping: z.union([z.string(), z.null()]).optional(),
+  customHeaderTemplateId: z.union([z.number().int().positive(), z.null()]).optional(),
+  customHeaders: z.union([z.string(), z.record(z.string(), z.unknown()), z.null()]).optional(),
   routingStrategy: z.string().optional(),
   enabled: z.boolean().optional(),
   sourceRouteIds: z.array(z.number().int().positive()).optional(),
+  activeSourceRouteId: z.union([z.number().int().positive(), z.null()]).optional(),
+  autoSourceQuery: z.union([z.string(), z.null()]).optional(),
 }).passthrough();
 
 const tokenRouteBatchPayloadSchema = z.object({
@@ -89,6 +97,12 @@ function formatTokenRoutePayloadError(error: z.ZodError): string {
   if (firstPath === 'modelMapping') {
     return 'Invalid modelMapping. Expected string or null.';
   }
+  if (firstPath === 'customHeaderTemplateId') {
+    return 'Invalid customHeaderTemplateId. Expected positive number or null.';
+  }
+  if (firstPath === 'customHeaders') {
+    return 'Invalid customHeaders. Expected JSON object string, object, or null.';
+  }
   if (firstPath === 'routingStrategy') {
     return 'Invalid routingStrategy. Expected string.';
   }
@@ -97,6 +111,12 @@ function formatTokenRoutePayloadError(error: z.ZodError): string {
   }
   if (firstPath === 'sourceRouteIds') {
     return 'Invalid sourceRouteIds. Expected number[].';
+  }
+  if (firstPath === 'activeSourceRouteId') {
+    return 'Invalid activeSourceRouteId. Expected positive number or null.';
+  }
+  if (firstPath === 'autoSourceQuery') {
+    return 'Invalid autoSourceQuery. Expected string or null.';
   }
   if (firstPath === 'ids') {
     return 'Invalid ids. Expected number[].';

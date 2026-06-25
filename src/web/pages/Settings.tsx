@@ -7,7 +7,6 @@ import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
 import ModernSelect from '../components/ModernSelect.js';
 import ResponsiveFormGrid from '../components/ResponsiveFormGrid.js';
 import FactoryResetModal from './settings/FactoryResetModal.js';
-import ModelAvailabilityProbeConfirmModal from './settings/ModelAvailabilityProbeConfirmModal.js';
 import {
   createCodexDefaultHighReasoningVisualPreset,
   createVisualPayloadRule,
@@ -33,7 +32,6 @@ import { generateDownstreamSkKey } from './helpers/generateDownstreamSkKey.js';
 const PROXY_TOKEN_PREFIX = 'sk-';
 const FACTORY_RESET_ADMIN_TOKEN = 'change-me-admin-token';
 const FACTORY_RESET_CONFIRM_SECONDS = 3;
-const MODEL_AVAILABILITY_PROBE_CONFIRM_TEXT = '我确认我使用的中转站全部允许批量测活，如因开启此功能被中转站封号，自行负责。';
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const ROUTE_COOLDOWN_UNIT_OPTIONS = [
   { value: 'second', label: '秒', multiplierSec: 1 },
@@ -67,7 +65,6 @@ type RuntimeSettings = {
   logCleanupUsageLogsEnabled: boolean;
   logCleanupProgramLogsEnabled: boolean;
   logCleanupRetentionDays: number;
-  modelAvailabilityProbeEnabled: boolean;
   codexUpstreamWebsocketEnabled: boolean;
   responsesCompactFallbackToResponsesEnabled: boolean;
   disableCrossProtocolFallback: boolean;
@@ -84,8 +81,6 @@ type RuntimeSettings = {
   proxyTokenMasked?: string;
   adminIpAllowlist?: string[];
   currentAdminIp?: string;
-  globalBlockedBrands?: string[];
-  globalAllowedModels?: string[];
 };
 
 type SystemProxyTestState =
@@ -349,7 +344,6 @@ export default function Settings() {
     logCleanupUsageLogsEnabled: false,
     logCleanupProgramLogsEnabled: false,
     logCleanupRetentionDays: 30,
-    modelAvailabilityProbeEnabled: false,
     codexUpstreamWebsocketEnabled: false,
     responsesCompactFallbackToResponsesEnabled: false,
     disableCrossProtocolFallback: false,
@@ -372,7 +366,6 @@ export default function Settings() {
   const [testingCheckin, setTestingCheckin] = useState(false);
   const [savingToken, setSavingToken] = useState(false);
   const [savingSystemProxy, setSavingSystemProxy] = useState(false);
-  const [savingModelAvailabilityProbe, setSavingModelAvailabilityProbe] = useState(false);
   const [savingProxyTransport, setSavingProxyTransport] = useState(false);
   const [testingSystemProxy, setTestingSystemProxy] = useState(false);
   const [systemProxyTestState, setSystemProxyTestState] = useState<SystemProxyTestState>(null);
@@ -384,13 +377,6 @@ export default function Settings() {
   const [showPayloadRulesEditor, setShowPayloadRulesEditor] = useState(false);
   const [savingRouting, setSavingRouting] = useState(false);
   const [showAdvancedRouting, setShowAdvancedRouting] = useState(false);
-  const [allBrandNames, setAllBrandNames] = useState<string[] | null>(null);
-  const [blockedBrands, setBlockedBrands] = useState<string[]>([]);
-  const [savingBrandFilter, setSavingBrandFilter] = useState(false);
-  const [availableModels, setAvailableModels] = useState<string[] | null>(null);
-  const [allowedModels, setAllowedModels] = useState<string[]>([]);
-  const [allowedModelsInput, setAllowedModelsInput] = useState('');
-  const [savingAllowedModels, setSavingAllowedModels] = useState(false);
   const [savingSecurity, setSavingSecurity] = useState(false);
   const [adminIpAllowlistText, setAdminIpAllowlistText] = useState('');
   const [clearingCache, setClearingCache] = useState(false);
@@ -414,10 +400,6 @@ export default function Settings() {
   const [migrationSummary, setMigrationSummary] = useState<DatabaseMigrationSummary | null>(null);
   const [runtimeDatabaseState, setRuntimeDatabaseState] = useState<RuntimeDatabaseState | null>(null);
   const [showChangeKey, setShowChangeKey] = useState(false);
-  const [modelAvailabilityProbeConfirmOpen, setModelAvailabilityProbeConfirmOpen] = useState(false);
-  const modelAvailabilityProbeConfirmPresence = useAnimatedVisibility(modelAvailabilityProbeConfirmOpen, 220);
-  const [modelAvailabilityProbeConfirmationInput, setModelAvailabilityProbeConfirmationInput] = useState('');
-  const [savedModelAvailabilityProbeEnabled, setSavedModelAvailabilityProbeEnabled] = useState(false);
   const [factoryResetOpen, setFactoryResetOpen] = useState(false);
   const factoryResetPresence = useAnimatedVisibility(factoryResetOpen, 220);
   const [factoryResetting, setFactoryResetting] = useState(false);
@@ -456,12 +438,6 @@ export default function Settings() {
       database: defaults.database,
     }));
   }, [migrationDialect]);
-
-  useEffect(() => {
-    if (!modelAvailabilityProbeConfirmOpen) {
-      setModelAvailabilityProbeConfirmationInput('');
-    }
-  }, [modelAvailabilityProbeConfirmOpen]);
 
   useEffect(() => {
     if (!factoryResetOpen) {
@@ -615,17 +591,6 @@ export default function Settings() {
 
   const proxyTransportModeLabel = runtime.codexUpstreamWebsocketEnabled ? '上游 WebSocket 已启用' : 'HTTP 优先';
   const proxyTransportQueueLabel = `会话池 ${runtime.proxySessionChannelConcurrencyLimit} 并发 / ${runtime.proxySessionChannelQueueWaitMs}ms`;
-  const modelAvailabilityProbeDirty = runtime.modelAvailabilityProbeEnabled !== savedModelAvailabilityProbeEnabled;
-  const modelAvailabilityProbeStatusTone: SettingsPillTone = modelAvailabilityProbeDirty
-    ? 'warning'
-    : savedModelAvailabilityProbeEnabled
-      ? 'danger'
-      : 'neutral';
-  const modelAvailabilityProbeStatusLabel = modelAvailabilityProbeDirty
-    ? '待保存'
-    : savedModelAvailabilityProbeEnabled
-      ? '已启用'
-      : '已关闭';
 
   const syncPayloadRuleDraftsFromObject = (value: unknown) => {
     setPayloadRuleDrafts(normalizePayloadRulesForEditor(value));
@@ -674,7 +639,6 @@ export default function Settings() {
         logCleanupRetentionDays: Number(runtimeInfo.logCleanupRetentionDays) >= 1
           ? Math.trunc(Number(runtimeInfo.logCleanupRetentionDays))
           : 30,
-        modelAvailabilityProbeEnabled: !!runtimeInfo.modelAvailabilityProbeEnabled,
         codexUpstreamWebsocketEnabled: !!runtimeInfo.codexUpstreamWebsocketEnabled,
         responsesCompactFallbackToResponsesEnabled: !!runtimeInfo.responsesCompactFallbackToResponsesEnabled,
         disableCrossProtocolFallback: !!runtimeInfo.disableCrossProtocolFallback,
@@ -706,12 +670,7 @@ export default function Settings() {
           ? runtimeInfo.adminIpAllowlist.filter((item: unknown) => typeof item === 'string')
           : [],
         currentAdminIp: typeof runtimeInfo.currentAdminIp === 'string' ? runtimeInfo.currentAdminIp : '',
-        globalBlockedBrands: Array.isArray(runtimeInfo.globalBlockedBrands) ? runtimeInfo.globalBlockedBrands : [],
-        globalAllowedModels: Array.isArray(runtimeInfo.globalAllowedModels) ? runtimeInfo.globalAllowedModels : [],
       });
-      setSavedModelAvailabilityProbeEnabled(!!runtimeInfo.modelAvailabilityProbeEnabled);
-      setBlockedBrands(Array.isArray(runtimeInfo.globalBlockedBrands) ? runtimeInfo.globalBlockedBrands : []);
-      setAllowedModels(Array.isArray(runtimeInfo.globalAllowedModels) ? runtimeInfo.globalAllowedModels : []);
       setProxyErrorKeywordsText(
         Array.isArray(runtimeInfo.proxyErrorKeywords)
           ? runtimeInfo.proxyErrorKeywords.filter((item: unknown) => typeof item === 'string').join('\n')
@@ -748,18 +707,6 @@ export default function Settings() {
     } finally {
       setLoading(false);
     }
-    // Load brand list in background (non-blocking, best-effort)
-    api.getBrandList()
-      .then((res: any) => setAllBrandNames(Array.isArray(res?.brands) ? res.brands : []))
-      .catch(() => setAllBrandNames([]));
-    // Load available models in background (non-blocking, best-effort)
-    api.getModelTokenCandidates()
-      .then((res: any) => {
-        const models = res?.models || {};
-        const modelNames = Object.keys(models);
-        setAvailableModels(modelNames.sort());
-      })
-      .catch(() => setAvailableModels([]));
   };
 
   useEffect(() => {
@@ -849,42 +796,6 @@ export default function Settings() {
     } finally {
       setSavingSystemProxy(false);
     }
-  };
-
-  const persistModelAvailabilityProbeSetting = async (enabled: boolean) => {
-    setSavingModelAvailabilityProbe(true);
-    try {
-      const res = await api.updateRuntimeSettings({
-        modelAvailabilityProbeEnabled: enabled,
-      });
-      const nextEnabled = typeof res?.modelAvailabilityProbeEnabled === 'boolean'
-        ? res.modelAvailabilityProbeEnabled
-        : enabled;
-      setRuntime((prev) => ({
-        ...prev,
-        modelAvailabilityProbeEnabled: nextEnabled,
-      }));
-      setSavedModelAvailabilityProbeEnabled(nextEnabled);
-      setModelAvailabilityProbeConfirmOpen(false);
-      setModelAvailabilityProbeConfirmationInput('');
-      toast.success(nextEnabled ? '批量测活已开启' : '批量测活已关闭');
-    } catch (err: any) {
-      toast.error(err?.message || '保存失败');
-    } finally {
-      setSavingModelAvailabilityProbe(false);
-    }
-  };
-
-  const saveModelAvailabilityProbeSettings = async () => {
-    if (runtime.modelAvailabilityProbeEnabled === savedModelAvailabilityProbeEnabled) {
-      toast.info('批量测活设置未变化');
-      return;
-    }
-    if (runtime.modelAvailabilityProbeEnabled) {
-      setModelAvailabilityProbeConfirmOpen(true);
-      return;
-    }
-    await persistModelAvailabilityProbeSetting(false);
   };
 
   const saveProxyTransportSettings = async () => {
@@ -1075,48 +986,6 @@ export default function Settings() {
     }));
   };
 
-  const handleSaveBrandFilter = async () => {
-    setSavingBrandFilter(true);
-    try {
-      const res = await api.updateRuntimeSettings({ globalBlockedBrands: blockedBrands });
-      const resolved = Array.isArray(res?.globalBlockedBrands) ? res.globalBlockedBrands : blockedBrands;
-      setRuntime((prev) => ({ ...prev, globalBlockedBrands: resolved }));
-      setBlockedBrands(resolved);
-      toast.success('品牌屏蔽设置已保存');
-      try {
-        await api.rebuildRoutes(false);
-        toast.success('路由已重建');
-      } catch {
-        toast.error('品牌屏蔽已保存，但路由重建失败，请手动重建');
-      }
-    } catch (err: any) {
-      toast.error(err?.message || '保存品牌屏蔽设置失败');
-    } finally {
-      setSavingBrandFilter(false);
-    }
-  };
-
-  const handleSaveAllowedModels = async () => {
-    setSavingAllowedModels(true);
-    try {
-      const res = await api.updateRuntimeSettings({ globalAllowedModels: allowedModels });
-      const resolved = Array.isArray(res?.globalAllowedModels) ? res.globalAllowedModels : allowedModels;
-      setRuntime((prev) => ({ ...prev, globalAllowedModels: resolved }));
-      setAllowedModels(resolved);
-      toast.success('模型白名单设置已保存');
-      try {
-        await api.rebuildRoutes(false);
-        toast.success('路由已重建');
-      } catch {
-        toast.error('模型白名单已保存，但路由重建失败，请手动重建');
-      }
-    } catch (err: any) {
-      toast.error(err?.message || '保存模型白名单设置失败');
-    } finally {
-      setSavingAllowedModels(false);
-    }
-  };
-
   const saveSecuritySettings = async () => {
     setSavingSecurity(true);
     try {
@@ -1172,16 +1041,6 @@ export default function Settings() {
   const closeFactoryResetModal = () => {
     if (factoryResetting) return;
     setFactoryResetOpen(false);
-  };
-
-  const closeModelAvailabilityProbeConfirmModal = () => {
-    if (savingModelAvailabilityProbe) return;
-    setModelAvailabilityProbeConfirmOpen(false);
-  };
-
-  const handleConfirmModelAvailabilityProbe = async () => {
-    if (modelAvailabilityProbeConfirmationInput.trim() !== MODEL_AVAILABILITY_PROBE_CONFIRM_TEXT) return;
-    await persistModelAvailabilityProbeSetting(true);
   };
 
   const handleFactoryReset = async () => {
@@ -1873,77 +1732,6 @@ export default function Settings() {
           </div>
         </div>
 
-        <div className="card animate-slide-up stagger-4" style={settingsModernDangerCardStyle} data-settings-card="model-availability-probe">
-          <div style={settingsModernHeaderStyle}>
-            <div style={settingsModernTitleBlockStyle}>
-              <div style={{ ...settingsModernTitleStyle, color: 'var(--color-danger)' }}>批量测活</div>
-              <div style={settingsModernDescriptionStyle}>
-                默认关闭。开启后，metapi 会在后台定时对活跃账号模型发送最小化探测请求，用来校正“/models 能看到但实际不可用”的假阳性。
-              </div>
-            </div>
-            <div style={settingsModernPillRowStyle}>
-              <span style={getSettingsPillStyle(modelAvailabilityProbeStatusTone)}>
-                {modelAvailabilityProbeStatusLabel}
-              </span>
-              <span style={getSettingsPillStyle('danger')}>
-                高风险操作
-              </span>
-            </div>
-          </div>
-          <div
-            style={{
-              ...settingsModernCalloutStyle,
-              borderColor: 'color-mix(in srgb, var(--color-danger) 18%, var(--color-border-light))',
-              background: 'color-mix(in srgb, var(--color-danger-soft) 38%, var(--color-bg-card))',
-            }}
-          >
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-danger)' }}>风险提示</div>
-            <div style={{ fontSize: 12, lineHeight: 1.75, color: 'var(--color-text-secondary)' }}>
-              只有在你确认自己使用的中转站明确允许批量测活时才应该开启。若上游不允许，这类探测可能带来封号或风控风险。
-            </div>
-          </div>
-          <label style={settingsModernToggleStyle}>
-            <div style={settingsModernToggleCopyStyle}>
-              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)' }}>允许 metapi 后台主动批量测活</span>
-              <span style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--color-text-muted)' }}>
-                首次从关闭切换到开启时，需要手动输入确认语句；关闭时可直接保存。
-              </span>
-            </div>
-            <input
-              type="checkbox"
-              checked={runtime.modelAvailabilityProbeEnabled}
-              onChange={(e) => setRuntime((prev) => ({ ...prev, modelAvailabilityProbeEnabled: e.target.checked }))}
-              style={{ width: 16, height: 16, marginTop: 2, flexShrink: 0 }}
-            />
-          </label>
-          <ResponsiveFormGrid columns={2}>
-            <div style={settingsModernFieldCardStyle}>
-              <div style={settingsModernFieldLabelStyle}>当前生效状态</div>
-              <div style={settingsModernPillRowStyle}>
-                <span style={getSettingsPillStyle(modelAvailabilityProbeStatusTone)}>
-                  {modelAvailabilityProbeStatusLabel}
-                </span>
-              </div>
-              <div style={settingsModernFieldHintStyle}>
-                {savedModelAvailabilityProbeEnabled
-                  ? '后台会定时执行最小化探测请求，用于校正模型可用性。'
-                  : '后台不会主动发起模型可用性探测请求。'}
-              </div>
-            </div>
-            <div style={settingsModernFieldCardStyle}>
-              <div style={settingsModernFieldLabelStyle}>启用门槛</div>
-              <div style={{ ...settingsModernFieldHintStyle, marginTop: 0 }}>
-                首次开启必须手动输入确认语句，避免误把高风险探测当成普通开关。
-              </div>
-            </div>
-          </ResponsiveFormGrid>
-          <div style={settingsModernActionsStyle}>
-            <button onClick={saveModelAvailabilityProbeSettings} disabled={savingModelAvailabilityProbe} className="btn btn-primary">
-              {savingModelAvailabilityProbe ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存批量测活设置'}
-            </button>
-          </div>
-        </div>
-
         <div className="card animate-slide-up stagger-4" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>下游访问令牌（PROXY_TOKEN）</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
@@ -2233,166 +2021,6 @@ export default function Settings() {
           </div>
         </div>
 
-        {/* Global Brand Filter */}
-        <div className="card animate-slide-up stagger-6" style={{ padding: 20 }}>
-          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>全局品牌屏蔽</div>
-          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12, lineHeight: 1.6 }}>
-            屏蔽选定品牌后，路由重建时将自动跳过匹配该品牌的所有模型。点击品牌切换屏蔽状态，保存后自动触发路由重建。
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
-            {(allBrandNames || []).map((brand) => {
-              const isBlocked = blockedBrands.includes(brand);
-              return (
-                <button
-                  key={brand}
-                  type="button"
-                  role="switch"
-                  aria-checked={isBlocked}
-                  onClick={() => {
-                    if (isBlocked) {
-                      setBlockedBrands((prev) => prev.filter((b) => b !== brand));
-                    } else {
-                      setBlockedBrands((prev) => [...prev, brand]);
-                    }
-                  }}
-                  className={`badge ${isBlocked ? 'badge-warning' : 'badge-muted'}`}
-                  style={{
-                    fontSize: 12, cursor: 'pointer', border: 'none', padding: '5px 12px',
-                    transition: 'all 0.15s ease',
-                  }}
-                >
-                  {brand}
-                </button>
-              );
-            })}
-            {allBrandNames === null && (
-              <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>加载品牌列表中...</span>
-            )}
-            {allBrandNames !== null && allBrandNames.length === 0 && (
-              <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无可用品牌</span>
-            )}
-          </div>
-          {blockedBrands.length > 0 && (
-            <div style={{ fontSize: 12, color: 'var(--color-warning)', marginBottom: 10 }}>
-              已屏蔽 {blockedBrands.length} 个品牌：{blockedBrands.join('、')}
-            </div>
-          )}
-          <button onClick={handleSaveBrandFilter} disabled={savingBrandFilter} className="btn btn-primary" style={{ fontSize: 12, padding: '6px 16px' }}>
-            {savingBrandFilter ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存品牌屏蔽'}
-          </button>
-        </div>
-
-        {/* Global Allowed Models Whitelist */}
-        <div className="card animate-slide-up stagger-7" style={{ padding: 20 }}>
-          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>全局模型白名单</div>
-          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12, lineHeight: 1.6 }}>
-            配置白名单后，路由重建和候选生成将只针对白名单中的模型。留空表示允许所有模型（向后兼容）。保存后自动触发路由重建。
-          </div>
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-              <input
-                type="text"
-                placeholder="输入模型名称，如：gpt-4"
-                value={allowedModelsInput}
-                onChange={(e) => setAllowedModelsInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && allowedModelsInput.trim()) {
-                    const model = allowedModelsInput.trim();
-                    if (!allowedModels.includes(model)) {
-                      setAllowedModels((prev) => [...prev, model]);
-                    }
-                    setAllowedModelsInput('');
-                  }
-                }}
-                style={{ flex: 1, ...inputStyle }}
-              />
-              <button
-                onClick={() => {
-                  if (allowedModelsInput.trim()) {
-                    const model = allowedModelsInput.trim();
-                    if (!allowedModels.includes(model)) {
-                      setAllowedModels((prev) => [...prev, model]);
-                    }
-                    setAllowedModelsInput('');
-                  }
-                }}
-                className="btn btn-ghost"
-                style={{ border: '1px solid var(--color-border)', fontSize: 12, padding: '6px 12px' }}
-              >
-                添加
-              </button>
-            </div>
-            {availableModels && availableModels.length > 0 && (
-              <div style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
-                  或从当前可用模型中选择：
-                </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxHeight: 120, overflowY: 'auto', border: '1px solid var(--color-border)', padding: 8, borderRadius: 4 }}>
-                  {availableModels.map((model) => {
-                    const isAllowed = allowedModels.includes(model);
-                    return (
-                      <button
-                        key={model}
-                        type="button"
-                        onClick={() => {
-                          if (isAllowed) {
-                            setAllowedModels((prev) => prev.filter((m) => m !== model));
-                          } else {
-                            setAllowedModels((prev) => [...prev, model]);
-                          }
-                        }}
-                        className={`badge ${isAllowed ? 'badge-success' : 'badge-muted'}`}
-                        style={{
-                          fontSize: 11, cursor: 'pointer', border: 'none', padding: '4px 10px',
-                          transition: 'all 0.15s ease',
-                        }}
-                      >
-                        {model}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-            {allowedModels.length > 0 && (
-              <div>
-                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
-                  已选择 {allowedModels.length} 个模型：
-                </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  {allowedModels.map((model) => (
-                    <div
-                      key={model}
-                      className="badge badge-success"
-                      style={{ fontSize: 11, padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 4 }}
-                    >
-                      {model}
-                      <button
-                        onClick={() => setAllowedModels((prev) => prev.filter((m) => m !== model))}
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          color: 'inherit',
-                          cursor: 'pointer',
-                          padding: 0,
-                          fontSize: 14,
-                          lineHeight: 1,
-                        }}
-                        title="移除"
-                      >
-                        ×
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-          <button onClick={handleSaveAllowedModels} disabled={savingAllowedModels} className="btn btn-primary" style={{ fontSize: 12, padding: '6px 16px' }}>
-            {savingAllowedModels ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存模型白名单'}
-          </button>
-        </div>
-
         <div className="card animate-slide-up stagger-8" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>数据库迁移（SQLite / MySQL / PostgreSQL）</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
@@ -2632,15 +2260,6 @@ export default function Settings() {
         adminToken={FACTORY_RESET_ADMIN_TOKEN}
         onClose={closeFactoryResetModal}
         onConfirm={handleFactoryReset}
-      />
-      <ModelAvailabilityProbeConfirmModal
-        presence={modelAvailabilityProbeConfirmPresence}
-        confirmText={MODEL_AVAILABILITY_PROBE_CONFIRM_TEXT}
-        confirmationInput={modelAvailabilityProbeConfirmationInput}
-        saving={savingModelAvailabilityProbe}
-        onConfirmationInputChange={setModelAvailabilityProbeConfirmationInput}
-        onClose={closeModelAvailabilityProbeConfirmModal}
-        onConfirm={handleConfirmModelAvailabilityProbe}
       />
     </div>
   );

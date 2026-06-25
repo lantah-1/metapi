@@ -363,7 +363,6 @@ export type RuntimeSettingsPayload = {
   proxyToken?: string;
   systemProxyUrl?: string;
   payloadRules?: Record<string, unknown> | null;
-  modelAvailabilityProbeEnabled?: boolean;
   codexUpstreamWebsocketEnabled?: boolean;
   responsesCompactFallbackToResponsesEnabled?: boolean;
   disableCrossProtocolFallback?: boolean;
@@ -414,8 +413,6 @@ export type RuntimeSettingsPayload = {
   routingWeights?: RuntimeRoutingWeightsPayload;
   proxyErrorKeywords?: string[] | string;
   proxyEmptyContentFailEnabled?: boolean;
-  globalBlockedBrands?: string[];
-  globalAllowedModels?: string[];
 };
 
 export type ProxyLogStatusFilter = "all" | "success" | "failed";
@@ -522,6 +519,14 @@ export type ProxyLogsResponse = {
   pageSize: number;
   clientOptions: ProxyLogClientOption[];
   summary: ProxyLogsSummary;
+};
+
+export type ClearProxyLogsResponse = {
+  success: boolean;
+  message?: string;
+  deletedProxyLogs: number;
+  deletedDebugTraces?: number;
+  deletedDebugAttempts?: number;
 };
 
 export type ProxyDebugTraceListItem = {
@@ -777,22 +782,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ url }),
     }),
-  getSiteDisabledModels: (siteId: number) =>
-    request(`/api/sites/${siteId}/disabled-models`),
-  updateSiteDisabledModels: (siteId: number, models: string[]) =>
-    request(`/api/sites/${siteId}/disabled-models`, {
-      method: "PUT",
-      body: JSON.stringify({ models }),
-    }),
-  getSiteAvailableModels: (siteId: number) =>
-    request(`/api/sites/${siteId}/available-models`),
-  probeSiteNow: (siteId: number, options?: { scope?: 'single' | 'all'; modelName?: string; latencyThresholdMs?: number }) =>
-    request(`/api/sites/${siteId}/probe-now`, {
-      method: 'POST',
-      body: JSON.stringify(options || {}),
-      timeoutMs: options?.scope === 'all' ? 120_000 : 30_000,
-    }),
-
   // Accounts
   getAccounts: async (params?: { includeOauth?: boolean }) => {
     const result = await request<any>(`/api/accounts${buildQueryString(params)}`);
@@ -941,6 +930,19 @@ export const api = {
     request(`/api/routes/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteRoute: (id: number) =>
     request(`/api/routes/${id}`, { method: "DELETE" }),
+  getRouteHeaderTemplates: () => request("/api/route-header-templates"),
+  addRouteHeaderTemplate: (data: any) =>
+    request("/api/route-header-templates", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateRouteHeaderTemplate: (id: number, data: any) =>
+    request(`/api/route-header-templates/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  deleteRouteHeaderTemplate: (id: number) =>
+    request(`/api/route-header-templates/${id}`, { method: "DELETE" }),
   clearRouteCooldown: (id: number) =>
     request(`/api/routes/${id}/cooldown/clear`, { method: "POST" }),
   batchUpdateRoutes: (data: { ids: number[]; action: "enable" | "disable" }) =>
@@ -1080,6 +1082,10 @@ export const api = {
   },
   getProxyLogDetail: (id: number) =>
     request(`/api/stats/proxy-logs/${id}`) as Promise<ProxyLogDetail>,
+  clearProxyLogs: () =>
+    request("/api/stats/proxy-logs", {
+      method: "DELETE",
+    }) as Promise<ClearProxyLogsResponse>,
   getProxyDebugTraces: (params?: { limit?: number }) =>
     request(
       `/api/stats/proxy-debug/traces${buildQueryString(params)}`,
@@ -1239,7 +1245,6 @@ export const api = {
       body: JSON.stringify({ oldToken, newToken }),
     }),
   getRuntimeSettings: () => request("/api/settings/runtime"),
-  getBrandList: () => request("/api/settings/brand-list"),
   updateRuntimeSettings: (data: RuntimeSettingsPayload) =>
     request("/api/settings/runtime", {
       method: "PUT",

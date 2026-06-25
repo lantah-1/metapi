@@ -83,6 +83,7 @@ import {
   recordSurfaceSuccess,
   selectSurfaceChannelForAttempt,
   trySurfaceOauthRefreshRecovery,
+  withSelectedRouteCustomHeaders,
 } from './sharedSurface.js';
 import {
   buildSurfaceProxyDebugResponseHeaders,
@@ -584,13 +585,13 @@ export async function handleOpenAiResponsesSurfaceRequest(
               })
               : endpointRequest.headers
           );
-          return {
+          return withSelectedRouteCustomHeaders(selected, {
             endpoint,
             path: upstreamPath,
             headers: requestHeaders,
             body: requestBody,
             runtime: endpointRequest.runtime,
-          };
+          });
         };
         const baseDispatchRequest = createSurfaceDispatchRequest({
           site: selected.site,
