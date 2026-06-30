@@ -78,6 +78,60 @@ function buildChannel(overrides: Partial<RouteChannel> = {}): RouteChannel {
 }
 
 describe('RouteCard', () => {
+  it('does not show routing strategy labels for switch groups', () => {
+    const root = create(
+      <RouteCard
+        route={buildRoute({
+          modelPattern: 'custom-gpt',
+          displayName: 'custom-gpt',
+          routeMode: 'switch_group',
+          sourceRouteIds: [11],
+          activeSourceRouteId: 11,
+          modelMapping: '{"activeSourceRouteId":11}',
+          routingStrategy: null,
+          channelCount: 1,
+          enabledChannelCount: 1,
+        })}
+        brand={null}
+        expanded
+        onToggleExpand={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onToggleEnabled={vi.fn()}
+        onClearCooldown={vi.fn()}
+        clearingCooldown={false}
+        onRoutingStrategyChange={vi.fn()}
+        updatingRoutingStrategy={false}
+        channels={[]}
+        loadingChannels={false}
+        routeDecision={null}
+        loadingDecision={false}
+        candidateView={{ routeCandidates: [], accountOptions: [], tokenOptionsByAccountId: {} }}
+        channelTokenDraft={{}}
+        updatingChannel={{}}
+        savingPriority={false}
+        onTokenDraftChange={vi.fn()}
+        onSaveToken={vi.fn()}
+        onDeleteChannel={vi.fn()}
+        onToggleChannelEnabled={vi.fn()}
+        onChannelDragEnd={vi.fn()}
+        missingTokenSiteItems={[]}
+        missingTokenGroupItems={[]}
+        onCreateTokenForMissing={vi.fn()}
+        onAddChannel={vi.fn()}
+        onSiteBlockModel={vi.fn()}
+        expandedSourceGroupMap={{}}
+        onToggleSourceGroup={vi.fn()}
+      />,
+    );
+
+    const text = collectText(root.root);
+    expect(text).toContain('直接转发到当前目标');
+    expect(text).not.toContain('权重随机');
+    expect(text).not.toContain('路由策略');
+    expect(root.root.findAll((node) => node.props['data-testid'] === 'compact-route-strategy-select')).toHaveLength(0);
+  });
+
   it('renders oauth route unit summary and member labels on expanded channels', () => {
     const root = create(
       <RouteCard

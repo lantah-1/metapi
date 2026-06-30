@@ -33,8 +33,10 @@ import {
 } from '../../services/oauth/routeUnitService.js';
 import { parseRouteCustomHeadersInput } from '../../services/routeCustomHeaders.js';
 import { routeHeaderTemplateExists } from '../../services/routeHeaderTemplateService.js';
+import { resolveAutoSourceRouteIds } from '../../services/routeSourceAutoMatchService.js';
 import {
   getSwitchGroupActiveSourceRouteId,
+  getSwitchGroupActiveSourceSiteId,
   normalizeTokenRouteMode,
   serializeSwitchGroupModelMapping,
   type RouteMode,
@@ -111,6 +113,13 @@ function normalizeActiveSourceRouteIdInput(input: unknown): number | null {
   return routeId > 0 ? routeId : null;
 }
 
+function normalizeActiveSourceSiteIdInput(input: unknown): number | null {
+  const value = Number(input);
+  if (!Number.isFinite(value)) return null;
+  const siteId = Math.trunc(value);
+  return siteId > 0 ? siteId : null;
+}
+
 function normalizeSourceRouteIdsInput(input: unknown): number[] {
   const rawValues = Array.isArray(input) ? input : [];
   const normalized: number[] = [];
@@ -123,14 +132,6 @@ function normalizeSourceRouteIdsInput(input: unknown): number[] {
     if (normalized.length >= 500) break;
   }
   return normalized;
-}
-
-function normalizeAutoSourceQuery(input: unknown): string {
-  return typeof input === 'string' ? input.trim() : '';
-}
-
-function normalizeAutoSourceComparable(input: string): string {
-  return input.trim().toLowerCase();
 }
 
 async function normalizeRouteCustomHeaderTemplateIdInput(
@@ -156,49 +157,6 @@ function normalizeRouteCustomHeadersInput(
     return { ok: false, message: parsed.error || 'Header 必须是 JSON 对象' };
   }
   return { ok: true, value: parsed.customHeaders };
-}
-
-function getAutoSourceModelAlias(modelName: string): string {
-  const normalized = normalizeAutoSourceComparable(modelName);
-  const slashIndex = normalized.lastIndexOf('/');
-  if (slashIndex >= 0 && slashIndex < normalized.length - 1) {
-    return normalized.slice(slashIndex + 1);
-  }
-  return normalized;
-}
-
-function matchesAutoSourceQuery(modelName: string, query: string): boolean {
-  const normalizedModel = normalizeAutoSourceComparable(modelName);
-  const normalizedQuery = normalizeAutoSourceComparable(query);
-  if (!normalizedModel || !normalizedQuery) return false;
-  if (normalizedModel === normalizedQuery) return true;
-  if (getAutoSourceModelAlias(normalizedModel) === normalizedQuery) return true;
-  if (normalizedModel.endsWith(`/${normalizedQuery}`)) return true;
-  return normalizedQuery.length >= 4 && normalizedModel.includes(normalizedQuery);
-}
-
-async function resolveAutoSourceRouteIds(queryInput: unknown, currentRouteId?: number): Promise<number[]> {
-  const query = normalizeAutoSourceQuery(queryInput);
-  if (!query) return [];
-
-  const routes = await db.select({
-    id: schema.tokenRoutes.id,
-    modelPattern: schema.tokenRoutes.modelPattern,
-    routeMode: schema.tokenRoutes.routeMode,
-    enabled: schema.tokenRoutes.enabled,
-  }).from(schema.tokenRoutes).all();
-
-  return routes
-    .filter((route) => (
-      route.enabled
-      && route.id !== currentRouteId
-      && !isPublicGroupRoute(route)
-      && isExactModelPattern(route.modelPattern)
-      && matchesAutoSourceQuery(route.modelPattern, query)
-    ))
-    .sort((left, right) => left.modelPattern.localeCompare(right.modelPattern, undefined, { sensitivity: 'base' }))
-    .map((route) => route.id)
-    .slice(0, 500);
 }
 
 async function loadRouteSourceIdsMap(routeIds: number[]): Promise<Map<number, number[]>> {
@@ -232,10 +190,15 @@ function decorateRoutesWithSources(
   }));
 }
 
-function serializeRouteRow(route: RouteRow): RouteRow & { activeSourceRouteId: number | null } {
+function serializeRouteRow(route: RouteRow): RouteRow & { activeSourceRouteId: number | null; activeSourceSiteId: number | null } {
+  const switchGroup = isSwitchGroupRoute(route);
   return {
     ...route,
-    activeSourceRouteId: isSwitchGroupRoute(route) ? getSwitchGroupActiveSourceRouteId(route.modelMapping) : null,
+    routingStrategy: switchGroup ? null : route.routingStrategy,
+    customHeaderTemplateId: route.customHeaderTemplateId,
+    customHeaders: switchGroup ? null : route.customHeaders,
+    activeSourceRouteId: switchGroup ? getSwitchGroupActiveSourceRouteId(route.modelMapping) : null,
+    activeSourceSiteId: switchGroup ? getSwitchGroupActiveSourceSiteId(route.modelMapping) : null,
   };
 }
 
@@ -282,6 +245,7 @@ async function validateExplicitGroupSourceRoutes(sourceRouteIds: number[], curre
 async function validateSwitchGroupSourceRoutes(
   sourceRouteIds: number[],
   activeSourceRouteId: number | null,
+  activeSourceSiteId: number | null,
   currentRouteId?: number,
 ): Promise<{ ok: true; activeSourceRouteId: number } | { ok: false; message: string }> {
   if (sourceRouteIds.length === 0) {
@@ -302,15 +266,27 @@ async function validateSwitchGroupSourceRoutes(
     if (isSwitchGroupRoute(route)) {
       return { ok: false, message: '切换分组不能选择另一个切换分组作为入口目标' };
     }
-    if (isExplicitGroupRoute(route)) continue;
-    if (!isExactModelPattern(route.modelPattern)) {
-      return { ok: false, message: '切换分组只能选择普通分组或精确模型路由作为入口目标' };
+    if (isExplicitGroupRoute(route) || !isExactModelPattern(route.modelPattern)) {
+      return { ok: false, message: '切换分组只能选择精确模型路由作为入口目标' };
     }
   }
 
   const normalizedActiveSourceRouteId = activeSourceRouteId ?? sourceRouteIds[0] ?? null;
   if (!normalizedActiveSourceRouteId || !sourceRouteIds.includes(normalizedActiveSourceRouteId)) {
     return { ok: false, message: '当前指向必须是已选择的入口目标' };
+  }
+
+  if (activeSourceSiteId) {
+    const siteRows = await db.select({
+      siteId: schema.sites.id,
+    }).from(schema.routeChannels)
+      .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
+      .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .where(eq(schema.routeChannels.routeId, normalizedActiveSourceRouteId))
+      .all();
+    if (!siteRows.some((row) => row.siteId === activeSourceSiteId)) {
+      return { ok: false, message: '当前指向供应商必须属于已选择的入口目标' };
+    }
   }
 
   return { ok: true, activeSourceRouteId: normalizedActiveSourceRouteId };
@@ -780,7 +756,13 @@ type RouteChannelSummary = {
   channelCount: number;
   enabledChannelCount: number;
   siteNames: Set<string>;
-  siteStatuses: Map<number | string, { id: number | null; name: string; status: string }>;
+  siteStatuses: Map<number | string, {
+    id: number | null;
+    name: string;
+    status: string;
+    channelCount: number;
+    enabledChannelCount: number;
+  }>;
 };
 
 function normalizeRouteSummarySiteStatus(status: unknown): string {
@@ -827,7 +809,7 @@ function resolveGroupDirectSourceRouteIds(
     return [];
   }
   if (isExplicitGroupRoute(activeRoute)) {
-    return activeRoute.sourceRouteIds;
+    return [];
   }
   if (isSwitchGroupRoute(activeRoute)) {
     return [];
@@ -946,8 +928,15 @@ async function fetchChannelsForRouteRows(
   const channelsByRoute = new Map<number, any[]>();
   for (const route of routes) {
     if (isPublicGroupRoute(route)) {
-      channelsByRoute.set(route.id, resolveGroupDirectSourceRouteIds(route, routeById)
-        .flatMap((sourceRouteId) => channelsByActualRouteId.get(sourceRouteId) || []));
+      let groupChannels = resolveGroupDirectSourceRouteIds(route, routeById)
+        .flatMap((sourceRouteId) => channelsByActualRouteId.get(sourceRouteId) || []);
+      const activeSourceSiteId = isSwitchGroupRoute(route)
+        ? getSwitchGroupActiveSourceSiteId(route.modelMapping)
+        : null;
+      if (activeSourceSiteId) {
+        groupChannels = groupChannels.filter((channel) => channel.site?.id === activeSourceSiteId);
+      }
+      channelsByRoute.set(route.id, groupChannels);
       continue;
     }
     channelsByRoute.set(route.id, channelsByActualRouteId.get(route.id) || []);
@@ -973,20 +962,35 @@ async function buildRouteChannelSummaryMap(routes: RouteRow[]): Promise<Map<numb
   for (const route of routes) {
     const channels = channelsByRoute.get(route.id) || [];
     const siteNames = new Set<string>();
-    const siteStatuses = new Map<number | string, { id: number | null; name: string; status: string }>();
+    const siteStatuses = new Map<number | string, {
+      id: number | null;
+      name: string;
+      status: string;
+      channelCount: number;
+      enabledChannelCount: number;
+    }>();
     let enabledChannelCount = 0;
     for (const channel of channels) {
-      if (isSummaryChannelRuntimeEnabled(channel)) enabledChannelCount += 1;
+      const channelEnabled = isSummaryChannelRuntimeEnabled(channel);
+      if (channelEnabled) enabledChannelCount += 1;
       const siteName = String(channel.site?.name || '').trim();
       if (siteName) {
         siteNames.add(siteName);
         const siteId = Number(channel.site?.id);
         const siteKey = Number.isFinite(siteId) && siteId > 0 ? Math.trunc(siteId) : siteName;
-        siteStatuses.set(siteKey, {
-          id: Number.isFinite(siteId) && siteId > 0 ? Math.trunc(siteId) : null,
-          name: siteName,
-          status: normalizeRouteSummarySiteStatus(channel.site?.status),
-        });
+        const existing = siteStatuses.get(siteKey);
+        if (existing) {
+          existing.channelCount += 1;
+          if (channelEnabled) existing.enabledChannelCount += 1;
+        } else {
+          siteStatuses.set(siteKey, {
+            id: Number.isFinite(siteId) && siteId > 0 ? Math.trunc(siteId) : null,
+            name: siteName,
+            status: normalizeRouteSummarySiteStatus(channel.site?.status),
+            channelCount: 1,
+            enabledChannelCount: channelEnabled ? 1 : 0,
+          });
+        }
       }
     }
     summaryByRoute.set(route.id, {
@@ -1010,10 +1014,11 @@ export async function tokensRoutes(app: FastifyInstance) {
       routeMode: route.routeMode,
       sourceRouteIds: route.sourceRouteIds,
       activeSourceRouteId: isSwitchGroupRoute(route) ? getSwitchGroupActiveSourceRouteId(route.modelMapping) : null,
+      activeSourceSiteId: isSwitchGroupRoute(route) ? getSwitchGroupActiveSourceSiteId(route.modelMapping) : null,
       modelMapping: route.modelMapping ?? null,
       customHeaderTemplateId: route.customHeaderTemplateId ?? null,
-      customHeaders: route.customHeaders ?? null,
-      routingStrategy: route.routingStrategy,
+      customHeaders: isSwitchGroupRoute(route) ? null : (route.customHeaders ?? null),
+      routingStrategy: isSwitchGroupRoute(route) ? null : route.routingStrategy,
       enabled: route.enabled,
     }));
   });
@@ -1040,10 +1045,11 @@ export async function tokensRoutes(app: FastifyInstance) {
         routeMode: route.routeMode,
         sourceRouteIds: route.sourceRouteIds,
         activeSourceRouteId: isSwitchGroupRoute(route) ? getSwitchGroupActiveSourceRouteId(route.modelMapping) : null,
+        activeSourceSiteId: isSwitchGroupRoute(route) ? getSwitchGroupActiveSourceSiteId(route.modelMapping) : null,
         modelMapping: route.modelMapping ?? null,
         customHeaderTemplateId: route.customHeaderTemplateId ?? null,
-        customHeaders: route.customHeaders ?? null,
-        routingStrategy: route.routingStrategy ?? 'weighted',
+        customHeaders: isSwitchGroupRoute(route) ? null : (route.customHeaders ?? null),
+        routingStrategy: isSwitchGroupRoute(route) ? null : (route.routingStrategy ?? 'weighted'),
         enabled: route.enabled,
         channelCount: agg?.channelCount ?? 0,
         enabledChannelCount: agg?.enabledChannelCount ?? 0,
@@ -1168,6 +1174,7 @@ export async function tokensRoutes(app: FastifyInstance) {
     return routes.map((route) => ({
       ...route,
       activeSourceRouteId: isSwitchGroupRoute(route) ? getSwitchGroupActiveSourceRouteId(route.modelMapping) : null,
+      activeSourceSiteId: isSwitchGroupRoute(route) ? getSwitchGroupActiveSourceSiteId(route.modelMapping) : null,
       decisionSnapshot: parseRouteDecisionSnapshot(route.decisionSnapshot),
       decisionRefreshedAt: route.decisionRefreshedAt ?? null,
       channels: channelsByRoute.get(route.id) || [],
@@ -1325,12 +1332,17 @@ export async function tokensRoutes(app: FastifyInstance) {
     const displayName = typeof body.displayName === 'string' ? body.displayName.trim() : '';
     let sourceRouteIds = normalizeSourceRouteIdsInput(body.sourceRouteIds);
     let activeSourceRouteId = normalizeActiveSourceRouteIdInput(body.activeSourceRouteId);
-    const normalizedRoutingStrategy = normalizeRouteRoutingStrategy(body.routingStrategy);
+    const activeSourceSiteId = normalizeActiveSourceSiteIdInput(body.activeSourceSiteId);
+    const normalizedRoutingStrategy = routeMode === 'switch_group'
+      ? DEFAULT_ROUTE_ROUTING_STRATEGY
+      : normalizeRouteRoutingStrategy(body.routingStrategy);
     const customHeaderTemplateId = await normalizeRouteCustomHeaderTemplateIdInput(body.customHeaderTemplateId);
     if (!customHeaderTemplateId.ok) {
       return reply.code(400).send({ success: false, message: customHeaderTemplateId.message });
     }
-    const customHeaders = normalizeRouteCustomHeadersInput(body.customHeaders);
+    const customHeaders = routeMode === 'switch_group'
+      ? { ok: true as const, value: null }
+      : normalizeRouteCustomHeadersInput(body.customHeaders);
     if (!customHeaders.ok) {
       return reply.code(400).send({ success: false, message: customHeaders.message });
     }
@@ -1354,12 +1366,12 @@ export async function tokensRoutes(app: FastifyInstance) {
         return reply.code(400).send({ success: false, message: validation.message });
       }
     } else if (routeMode === 'switch_group') {
-      const validation = await validateSwitchGroupSourceRoutes(sourceRouteIds, activeSourceRouteId);
+      const validation = await validateSwitchGroupSourceRoutes(sourceRouteIds, activeSourceRouteId, activeSourceSiteId);
       if (!validation.ok) {
         return reply.code(400).send({ success: false, message: validation.message });
       }
       activeSourceRouteId = validation.activeSourceRouteId;
-      modelMapping = serializeSwitchGroupModelMapping(modelMapping, activeSourceRouteId);
+      modelMapping = serializeSwitchGroupModelMapping(modelMapping, activeSourceRouteId, activeSourceSiteId);
     } else if (!modelPattern) {
       return reply.code(400).send({ success: false, message: '模型匹配不能为空' });
     }
@@ -1371,7 +1383,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       routeMode,
       modelMapping,
       customHeaderTemplateId: customHeaderTemplateId.value,
-      customHeaders: customHeaders.value,
+      customHeaders: routeMode === 'switch_group' ? null : customHeaders.value,
       routingStrategy: normalizedRoutingStrategy,
       enabled: body.enabled ?? true,
     }).run();
@@ -1427,6 +1439,9 @@ export async function tokensRoutes(app: FastifyInstance) {
     let nextActiveSourceRouteId = isSwitchGroupRoute(existingRoute)
       ? getSwitchGroupActiveSourceRouteId(existingRoute.modelMapping)
       : null;
+    let nextActiveSourceSiteId = isSwitchGroupRoute(existingRoute)
+      ? getSwitchGroupActiveSourceSiteId(existingRoute.modelMapping)
+      : null;
     const previousRoutingStrategy = normalizeRouteRoutingStrategy(existingRoute.routingStrategy);
     let nextRoutingStrategy = previousRoutingStrategy;
 
@@ -1457,24 +1472,42 @@ export async function tokensRoutes(app: FastifyInstance) {
       }
     } else if (routeMode === 'switch_group') {
       const activeSourceRouteIdProvided = body.activeSourceRouteId !== undefined;
+      const activeSourceSiteIdProvided = body.activeSourceSiteId !== undefined;
       if (body.sourceRouteIds !== undefined) {
         nextSourceRouteIds = normalizeSourceRouteIdsInput(body.sourceRouteIds);
       }
       if (activeSourceRouteIdProvided) {
         nextActiveSourceRouteId = normalizeActiveSourceRouteIdInput(body.activeSourceRouteId);
       }
+      if (activeSourceSiteIdProvided) {
+        nextActiveSourceSiteId = normalizeActiveSourceSiteIdInput(body.activeSourceSiteId);
+      }
       if (!activeSourceRouteIdProvided && (!nextActiveSourceRouteId || !nextSourceRouteIds.includes(nextActiveSourceRouteId))) {
         nextActiveSourceRouteId = nextSourceRouteIds[0] ?? null;
       }
-      const validation = await validateSwitchGroupSourceRoutes(nextSourceRouteIds, nextActiveSourceRouteId, id);
+      if (!activeSourceSiteIdProvided) {
+        const previousActiveSourceRouteId = isSwitchGroupRoute(existingRoute)
+          ? getSwitchGroupActiveSourceRouteId(existingRoute.modelMapping)
+          : null;
+        if (nextActiveSourceRouteId !== previousActiveSourceRouteId) {
+          nextActiveSourceSiteId = null;
+        }
+      }
+      const validation = await validateSwitchGroupSourceRoutes(
+        nextSourceRouteIds,
+        nextActiveSourceRouteId,
+        nextActiveSourceSiteId,
+        id,
+      );
       if (!validation.ok) {
         return reply.code(400).send({ success: false, message: validation.message });
       }
       nextActiveSourceRouteId = validation.activeSourceRouteId;
-      if (body.modelMapping !== undefined || activeSourceRouteIdProvided || body.sourceRouteIds !== undefined) {
+      if (body.modelMapping !== undefined || activeSourceRouteIdProvided || activeSourceSiteIdProvided || body.sourceRouteIds !== undefined) {
         updates.modelMapping = serializeSwitchGroupModelMapping(
           body.modelMapping !== undefined ? body.modelMapping : existingRoute.modelMapping,
           nextActiveSourceRouteId,
+          nextActiveSourceSiteId,
         );
       }
     } else if (body.modelPattern !== undefined) {
@@ -1489,14 +1522,24 @@ export async function tokensRoutes(app: FastifyInstance) {
       }
       updates.customHeaderTemplateId = customHeaderTemplateId.value;
     }
-    if (body.customHeaders !== undefined) {
+    if (routeMode === 'switch_group') {
+      if (body.customHeaders !== undefined || existingRoute.customHeaders != null) {
+        updates.customHeaders = null;
+      }
+    }
+    if (routeMode !== 'switch_group' && body.customHeaders !== undefined) {
       const customHeaders = normalizeRouteCustomHeadersInput(body.customHeaders);
       if (!customHeaders.ok) {
         return reply.code(400).send({ success: false, message: customHeaders.message });
       }
       updates.customHeaders = customHeaders.value;
     }
-    if (body.routingStrategy !== undefined) {
+    if (routeMode === 'switch_group') {
+      nextRoutingStrategy = DEFAULT_ROUTE_ROUTING_STRATEGY;
+      if (body.routingStrategy !== undefined || previousRoutingStrategy !== DEFAULT_ROUTE_ROUTING_STRATEGY) {
+        updates.routingStrategy = DEFAULT_ROUTE_ROUTING_STRATEGY;
+      }
+    } else if (body.routingStrategy !== undefined) {
       nextRoutingStrategy = normalizeRouteRoutingStrategy(body.routingStrategy);
       updates.routingStrategy = nextRoutingStrategy;
     }
@@ -1527,7 +1570,7 @@ export async function tokensRoutes(app: FastifyInstance) {
     const modelPatternChanged = nextModelPattern !== existingRoute.modelPattern;
     const routeBehaviorChanged = modelPatternChanged
       || (routeMode === 'explicit_group' && (body.sourceRouteIds !== undefined || body.autoSourceQuery !== undefined))
-      || (routeMode === 'switch_group' && (body.sourceRouteIds !== undefined || body.activeSourceRouteId !== undefined))
+      || (routeMode === 'switch_group' && (body.sourceRouteIds !== undefined || body.activeSourceRouteId !== undefined || body.activeSourceSiteId !== undefined))
       || body.modelMapping !== undefined
       || body.routingStrategy !== undefined
       || body.enabled !== undefined;

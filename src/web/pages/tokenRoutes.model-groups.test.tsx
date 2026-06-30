@@ -42,7 +42,7 @@ const exactOpenAi = {
   channelCount: 1,
   enabledChannelCount: 1,
   siteNames: ['OpenAI'],
-  siteStatuses: [{ id: 101, name: 'OpenAI', status: 'active' }],
+  siteStatuses: [{ id: 101, name: 'OpenAI', status: 'active', channelCount: 1, enabledChannelCount: 1 }],
   decisionSnapshot: null,
   decisionRefreshedAt: null,
 };
@@ -62,7 +62,7 @@ const exactAzure = {
   channelCount: 1,
   enabledChannelCount: 1,
   siteNames: ['Azure'],
-  siteStatuses: [{ id: 102, name: 'Azure', status: 'active' }],
+  siteStatuses: [{ id: 102, name: 'Azure', status: 'active', channelCount: 1, enabledChannelCount: 1 }],
   decisionSnapshot: null,
   decisionRefreshedAt: null,
 };
@@ -82,7 +82,7 @@ const exactClaude = {
   channelCount: 1,
   enabledChannelCount: 1,
   siteNames: ['Anthropic'],
-  siteStatuses: [{ id: 103, name: 'Anthropic', status: 'active' }],
+  siteStatuses: [{ id: 103, name: 'Anthropic', status: 'active', channelCount: 1, enabledChannelCount: 1 }],
   decisionSnapshot: null,
   decisionRefreshedAt: null,
 };
@@ -103,8 +103,8 @@ const groupGpt = {
   enabledChannelCount: 2,
   siteNames: ['OpenAI', 'Azure'],
   siteStatuses: [
-    { id: 101, name: 'OpenAI', status: 'active' },
-    { id: 102, name: 'Azure', status: 'active' },
+    { id: 101, name: 'OpenAI', status: 'active', channelCount: 1, enabledChannelCount: 1 },
+    { id: 102, name: 'Azure', status: 'active', channelCount: 1, enabledChannelCount: 1 },
   ],
   decisionSnapshot: null,
   decisionRefreshedAt: null,
@@ -116,20 +116,21 @@ const switchCustom = {
   displayName: 'custom',
   displayIcon: null,
   routeMode: 'switch_group',
-  sourceRouteIds: [21, 13],
-  activeSourceRouteId: 21,
-  modelMapping: '{"activeSourceRouteId":21}',
+  sourceRouteIds: [11, 13],
+  activeSourceRouteId: 11,
+  activeSourceSiteId: 101,
+  modelMapping: '{"activeSourceRouteId":11,"activeSourceSiteId":101}',
   customHeaderTemplateId: null,
   customHeaders: null,
-  routingStrategy: 'stable_first',
+  routingStrategy: null,
   enabled: true,
   channelCount: 2,
   enabledChannelCount: 2,
   siteNames: ['OpenAI', 'Azure', 'Anthropic'],
   siteStatuses: [
-    { id: 101, name: 'OpenAI', status: 'active' },
-    { id: 102, name: 'Azure', status: 'active' },
-    { id: 103, name: 'Anthropic', status: 'active' },
+    { id: 101, name: 'OpenAI', status: 'active', channelCount: 1, enabledChannelCount: 1 },
+    { id: 102, name: 'Azure', status: 'active', channelCount: 1, enabledChannelCount: 1 },
+    { id: 103, name: 'Anthropic', status: 'active', channelCount: 1, enabledChannelCount: 1 },
   ],
   decisionSnapshot: null,
   decisionRefreshedAt: null,
@@ -153,13 +154,6 @@ function findButtonByText(root: ReactTestInstance, text: string): ReactTestInsta
   return root.find((node) => (
     node.type === 'button'
     && collectText(node).includes(text)
-  ));
-}
-
-function findButtonByExactText(root: ReactTestInstance, text: string): ReactTestInstance {
-  return root.find((node) => (
-    node.type === 'button'
-    && collectText(node).trim() === text
   ));
 }
 
@@ -196,6 +190,10 @@ function findQuickSwitch(root: ReactTestInstance, routeId: number): ReactTestIns
   return root.find((node) => node.props['data-testid'] === `model-group-quick-switch-${routeId}`);
 }
 
+function findModernSelectByTestId(root: ReactTestInstance, testId: string): ReactTestInstance {
+  return root.find((node) => node.props['data-testid'] === testId);
+}
+
 function findModernSelectOption(root: ReactTestInstance, text: string): ReactTestInstance {
   return root.find((node) => (
     node.type === 'button'
@@ -218,15 +216,6 @@ function findSourceRowByText(root: ReactTestInstance, text: string): ReactTestIn
     && typeof node.props.className === 'string'
     && node.props.className.includes('model-group-source-row')
     && collectText(node).includes(text)
-  ));
-}
-
-function findSourceRowByTextParts(root: ReactTestInstance, parts: string[]): ReactTestInstance {
-  return root.find((node) => (
-    node.type === 'label'
-    && typeof node.props.className === 'string'
-    && node.props.className.includes('model-group-source-row')
-    && parts.every((part) => collectText(node).includes(part))
   ));
 }
 
@@ -331,6 +320,9 @@ describe('TokenRoutes model groups page', () => {
       expect(sections).toHaveLength(2);
       expect(collectText(sections[0])).toContain('切换分组');
       expect(collectText(sections[0])).toContain('custom');
+      expect(collectText(sections[0])).toContain('直接切换');
+      expect(collectText(sections[0])).not.toContain('权重随机');
+      expect(collectText(sections[0])).not.toContain('稳定优先');
       expect(collectText(sections[0])).not.toContain('gpt-5.5普通分组');
       expect(collectText(sections[1])).toContain('普通分组');
       expect(collectText(sections[1])).toContain('gpt-5.5');
@@ -359,24 +351,46 @@ describe('TokenRoutes model groups page', () => {
       expect(collectText(detail)).toContain('当前使用');
       expect(detail.findAll((node) => node.props.className === 'model-group-detail-list')).toHaveLength(0);
       const currentTarget = detail.find((node) => node.props.className === 'model-group-current-target');
-      expect(collectText(currentTarget)).toContain('gpt-5.5');
+      expect(collectText(currentTarget)).toContain('openai/gpt-5.5');
       expect(collectText(currentTarget)).not.toContain('claude-sonnet-4-5');
 
-      const quickSwitch = findQuickSwitch(root.root, 22);
-      const quickSwitchOptions = quickSwitch.findAll((node) => (
-        node.type === 'button'
-        && typeof node.props.className === 'string'
-        && node.props.className.includes('modern-select-option')
-      ));
-      expect(collectText(quickSwitchOptions[0])).toContain('gpt-5.5');
-      expect(collectText(quickSwitchOptions[1])).toContain('claude-sonnet-4-5');
-      const groupOption = findModernSelectOption(quickSwitch, 'gpt-5.5');
+      const headerTemplateSelect = findModernSelectByTestId(root.root, 'model-group-quick-switch-header-22');
+      const headerTemplateOption = findModernSelectOption(headerTemplateSelect, 'Codex Header');
+      await act(async () => {
+        headerTemplateOption.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.updateRoute).toHaveBeenCalledWith(22, {
+        customHeaderTemplateId: 31,
+      });
+
+      const sourceSelect = findModernSelectByTestId(root.root, 'model-group-quick-switch-source-22');
+      const groupOption = findModernSelectOption(sourceSelect, 'gpt-5.5');
       expect(collectText(groupOption)).toContain('分组');
       expect(collectText(groupOption)).toContain('普通分组');
       expect(collectText(groupOption)).toContain('OpenAI、Azure');
+      await act(async () => {
+        groupOption.props.onClick();
+      });
+
+      const quickSwitch = findQuickSwitch(root.root, 22);
+      const groupedModelOption = findModernSelectOption(quickSwitch, 'openai/gpt-5.5');
+      expect(collectText(groupedModelOption)).toContain('精确模型');
+      expect(collectText(groupedModelOption)).toContain('OpenAI');
+      expect(collectText(findModernSelectOption(quickSwitch, 'azure/gpt-5.5'))).toContain('Azure');
+      expect(() => findModernSelectOption(quickSwitch, 'gpt-5.5普通分组')).toThrow();
+
+      const providerOption = findModernSelectOption(sourceSelect, 'Anthropic');
+      expect(collectText(providerOption)).toContain('供应商');
+      expect(collectText(providerOption)).toContain('1 模型');
+
+      await act(async () => {
+        providerOption.props.onClick();
+      });
+
       const singleModelOption = findModernSelectOption(quickSwitch, 'claude-sonnet-4-5');
-      expect(collectText(singleModelOption)).toContain('单模');
-      expect(collectText(singleModelOption)).toContain('供应商单模型');
+      expect(collectText(singleModelOption)).toContain('精确模型');
       expect(collectText(singleModelOption)).toContain('Anthropic');
 
       await act(async () => {
@@ -384,7 +398,11 @@ describe('TokenRoutes model groups page', () => {
       });
       await flushMicrotasks();
 
-      expect(apiMock.updateRoute).toHaveBeenCalledWith(22, { activeSourceRouteId: 13 });
+      expect(apiMock.updateRoute).toHaveBeenCalledWith(22, {
+        sourceRouteIds: [13],
+        activeSourceRouteId: 13,
+        activeSourceSiteId: 103,
+      });
     } finally {
       root.unmount();
     }
@@ -500,7 +518,7 @@ describe('TokenRoutes model groups page', () => {
     }
   });
 
-  it('creates a switch group with an existing group as the active target', async () => {
+  it('creates a switch group with a precise model expanded from an existing group', async () => {
     const root = await renderPage();
     try {
       await act(async () => {
@@ -517,13 +535,25 @@ describe('TokenRoutes model groups page', () => {
       });
 
       const pageText = collectText(root.root);
-      expect(pageText).toContain('普通分组');
-      expect(pageText).toContain('供应商单模型');
+      expect(pageText).toContain('指向目标');
+      expect(pageText).toContain('选择分组或供应商');
+      expect(pageText).toContain('选择模型');
 
-      const groupTargetRow = findSourceRowByTextParts(root.root, ['gpt-5.5', '分组', '2 可用通道']);
-      const groupTargetCheckbox = groupTargetRow.findByType('input');
+      const sourceSelect = findModernSelectByTestId(root.root, 'model-group-editor-switch-source');
+      const groupSourceOption = findModernSelectOption(sourceSelect, 'gpt-5.5');
+      expect(collectText(groupSourceOption)).toContain('分组');
       await act(async () => {
-        groupTargetCheckbox.props.onChange();
+        groupSourceOption.props.onClick();
+      });
+
+      const modelSelect = findModernSelectByTestId(root.root, 'model-group-editor-switch-model');
+      const groupModelOption = findModernSelectOption(modelSelect, 'openai/gpt-5.5');
+      expect(collectText(groupModelOption)).toContain('精确模型');
+      expect(collectText(groupModelOption)).toContain('OpenAI');
+      expect(collectText(findModernSelectOption(modelSelect, 'azure/gpt-5.5'))).toContain('Azure');
+      expect(() => findModernSelectOption(modelSelect, 'gpt-5.5普通分组')).toThrow();
+      await act(async () => {
+        groupModelOption.props.onClick();
       });
 
       await act(async () => {
@@ -536,15 +566,101 @@ describe('TokenRoutes model groups page', () => {
       expect(payload).toMatchObject({
         routeMode: 'switch_group',
         displayName: 'custom',
-        sourceRouteIds: [21],
-        activeSourceRouteId: 21,
+        sourceRouteIds: [11],
+        activeSourceRouteId: 11,
+        activeSourceSiteId: 101,
+        customHeaderTemplateId: null,
+      });
+      expect(payload.routingStrategy).toBeUndefined();
+      expect(payload.customHeaders).toBeUndefined();
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('lists every supplier for the selected normal group model target', async () => {
+    apiMock.getRoutesSummary.mockResolvedValue([
+      {
+        ...exactOpenAi,
+        modelPattern: 'gpt-5.5',
+        channelCount: 3,
+        enabledChannelCount: 3,
+        siteNames: ['Provider A', 'Provider B', 'Provider C'],
+        siteStatuses: [
+          { id: 201, name: 'Provider A', status: 'active', channelCount: 1, enabledChannelCount: 1 },
+          { id: 202, name: 'Provider B', status: 'active', channelCount: 1, enabledChannelCount: 1 },
+          { id: 203, name: 'Provider C', status: 'active', channelCount: 1, enabledChannelCount: 1 },
+        ],
+      },
+      exactClaude,
+      {
+        ...groupGpt,
+        sourceRouteIds: [11],
+        siteNames: ['Provider A', 'Provider B', 'Provider C'],
+        siteStatuses: [
+          { id: 201, name: 'Provider A', status: 'active', channelCount: 1, enabledChannelCount: 1 },
+          { id: 202, name: 'Provider B', status: 'active', channelCount: 1, enabledChannelCount: 1 },
+          { id: 203, name: 'Provider C', status: 'active', channelCount: 1, enabledChannelCount: 1 },
+        ],
+      },
+    ]);
+
+    const root = await renderPage();
+    try {
+      await act(async () => {
+        findButtonByText(root.root, '新建分组').props.onClick();
+      });
+
+      const nameInput = findInputByPlaceholder(root.root, '例如 gpt-5.5');
+      await act(async () => {
+        nameInput.props.onChange({ target: { value: 'custom' } });
+      });
+
+      await act(async () => {
+        findButtonByText(root.root, '切换分组').props.onClick();
+      });
+
+      const sourceSelect = findModernSelectByTestId(root.root, 'model-group-editor-switch-source');
+      await act(async () => {
+        findModernSelectOption(sourceSelect, 'gpt-5.5').props.onClick();
+      });
+
+      const modelSelect = findModernSelectByTestId(root.root, 'model-group-editor-switch-model');
+      const providerA = findModernSelectOption(modelSelect, 'gpt-5.5 / Provider A');
+      const providerB = findModernSelectOption(modelSelect, 'gpt-5.5 / Provider B');
+      const providerC = findModernSelectOption(modelSelect, 'gpt-5.5 / Provider C');
+      expect(collectText(providerA)).toContain('1 可用通道');
+      expect(collectText(providerB)).toContain('1 可用通道');
+      expect(collectText(providerC)).toContain('1 可用通道');
+      expect(collectText(providerA)).not.toContain('3 可用通道');
+      expect(collectText(providerA)).toContain('指定供应商');
+      expect(collectText(providerB)).toContain('指定供应商');
+      expect(collectText(providerC)).toContain('指定供应商');
+
+      await act(async () => {
+        providerB.props.onClick();
+      });
+
+      await act(async () => {
+        findButtonByText(root.root, '创建分组').props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.addRoute).toHaveBeenCalledTimes(1);
+      const payload = apiMock.addRoute.mock.calls[0]?.[0];
+      expect(payload).toMatchObject({
+        routeMode: 'switch_group',
+        displayName: 'custom',
+        sourceRouteIds: [11],
+        activeSourceRouteId: 11,
+        activeSourceSiteId: 202,
       });
     } finally {
       root.unmount();
     }
   });
 
-  it('selects all visible switch targets across separated sections', async () => {
+  it('keeps switch-group creation focused on one target without strategy or header controls', async () => {
     const root = await renderPage();
     try {
       await act(async () => {
@@ -560,8 +676,51 @@ describe('TokenRoutes model groups page', () => {
         findButtonByText(root.root, '切换分组').props.onClick();
       });
 
+      const dialog = root.root.find((node) => node.props.role === 'dialog');
+      const dialogText = collectText(dialog);
+      expect(dialogText).toContain('指向目标');
+      expect(dialogText).toContain('选择分组或供应商');
+      expect(dialogText).toContain('选择模型');
+      expect(dialogText).toContain('Header 模板');
+      expect(dialogText).toContain('Anthropic');
+      expect(dialogText).not.toContain('选择策略');
+      expect(dialogText).not.toContain('分组自定义 Header');
+      expect(dialogText).not.toContain('自动匹配关键词');
+      expect(dialogText).not.toContain('全选可见');
+      expect(dialogText).not.toContain('清空');
+
+      const sourceSelect = findModernSelectByTestId(root.root, 'model-group-editor-switch-source');
+      const headerTemplateSelect = findModernSelectByTestId(root.root, 'model-group-editor-switch-header-template');
+      const headerTemplateOption = findModernSelectOption(headerTemplateSelect, 'Codex Header');
       await act(async () => {
-        findButtonByExactText(root.root, '全选可见').props.onClick();
+        headerTemplateOption.props.onClick();
+      });
+
+      const groupSourceOption = findModernSelectOption(sourceSelect, 'gpt-5.5');
+      await act(async () => {
+        groupSourceOption.props.onClick();
+      });
+      const groupModelOption = findModernSelectOption(
+        findModernSelectByTestId(root.root, 'model-group-editor-switch-model'),
+        'openai/gpt-5.5',
+      );
+      await act(async () => {
+        groupModelOption.props.onClick();
+      });
+
+      const providerOption = findModernSelectOption(sourceSelect, 'Anthropic');
+      expect(collectText(providerOption)).toContain('供应商');
+      await act(async () => {
+        providerOption.props.onClick();
+      });
+      const singleModelOption = findModernSelectOption(
+        findModernSelectByTestId(root.root, 'model-group-editor-switch-model'),
+        'claude-sonnet-4-5',
+      );
+      expect(collectText(singleModelOption)).toContain('精确模型');
+      expect(collectText(singleModelOption)).toContain('Anthropic');
+      await act(async () => {
+        singleModelOption.props.onClick();
       });
 
       await act(async () => {
@@ -572,8 +731,12 @@ describe('TokenRoutes model groups page', () => {
       expect(apiMock.addRoute).toHaveBeenCalledTimes(1);
       const payload = apiMock.addRoute.mock.calls[0]?.[0];
       expect(payload.routeMode).toBe('switch_group');
-      expect(payload.activeSourceRouteId).toBe(21);
-      expect([...payload.sourceRouteIds].sort((a, b) => a - b)).toEqual([11, 12, 13, 21]);
+      expect(payload.activeSourceRouteId).toBe(13);
+      expect(payload.activeSourceSiteId).toBe(103);
+      expect(payload.sourceRouteIds).toEqual([13]);
+      expect(payload.routingStrategy).toBeUndefined();
+      expect(payload.customHeaderTemplateId).toBe(31);
+      expect(payload.customHeaders).toBeUndefined();
     } finally {
       root.unmount();
     }

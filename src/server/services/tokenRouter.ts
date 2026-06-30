@@ -31,6 +31,7 @@ import {
 } from '../../shared/tokenRoutePatterns.js';
 import {
   getSwitchGroupActiveSourceRouteId,
+  getSwitchGroupActiveSourceSiteId,
   normalizeTokenRouteMode,
   type RouteDecision,
   type RouteDecisionCandidate,
@@ -39,6 +40,8 @@ import {
 
 interface RouteMatch {
   route: RouteRow;
+  selectionRoute?: RouteRow;
+  activeSourceSiteId?: number | null;
   channels: Array<{
     channel: typeof schema.routeChannels.$inferSelect;
     account: typeof schema.accounts.$inferSelect;
@@ -1169,6 +1172,10 @@ async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<Rout
 
   const enabledRoutes = await loadEnabledRoutes(nowMs);
   const enabledRouteById = new Map(enabledRoutes.map((item) => [item.id, item]));
+  let selectionRoute: RouteRow | undefined;
+  const activeSourceSiteId = isSwitchGroupRoute(route)
+    ? getSwitchGroupActiveSourceSiteId(route.modelMapping)
+    : null;
   const routeIds = (() => {
     if (isExplicitGroupRoute(route)) {
       return Array.from(new Set(route.sourceRouteIds.filter((routeId) => Number.isFinite(routeId) && routeId > 0)));
@@ -1178,12 +1185,10 @@ async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<Rout
       if (!activeSourceRouteId || !route.sourceRouteIds.includes(activeSourceRouteId)) return [];
       const activeSourceRoute = enabledRouteById.get(activeSourceRouteId);
       if (!activeSourceRoute) return [];
-      if (isExplicitGroupRoute(activeSourceRoute)) {
-        return Array.from(new Set(activeSourceRoute.sourceRouteIds.filter((routeId) => Number.isFinite(routeId) && routeId > 0)));
-      }
-      if (isSwitchGroupRoute(activeSourceRoute)) {
+      if (isPublicGroupRoute(activeSourceRoute)) {
         return [];
       }
+      selectionRoute = activeSourceRoute;
       return [activeSourceRoute.id];
     }
     if (!isPublicGroupRoute(route)) {
@@ -1225,30 +1230,35 @@ async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<Rout
     listOauthRouteUnitMembersByUnitIds(oauthRouteUnitIds),
   ]);
 
-  const mapped = channels.map((row) => ({
-    channel: {
-      ...row.route_channels,
-      sourceModel: normalizeChannelSourceModel(row.route_channels.sourceModel)
-        || fallbackSourceModelByRouteId.get(row.route_channels.routeId)
-        || null,
-    },
-    account: row.accounts,
-    site: row.sites,
-    token: row.account_tokens,
-    routeUnit: row.route_channels.oauthRouteUnitId
-      ? (routeUnitSummaries.get(row.route_channels.oauthRouteUnitId) || null)
-      : null,
-    routeUnitMembers: row.route_channels.oauthRouteUnitId
-      ? (routeUnitMembersByUnitId.get(row.route_channels.oauthRouteUnitId) || []).map((member) => ({
-        member: member.member,
-        account: member.account,
-        site: member.site,
-        token: null,
-      }))
-      : [],
-  }));
+  const mapped = channels
+    .filter((row) => {
+      if (!isSwitchGroupRoute(route) || !activeSourceSiteId) return true;
+      return row.sites.id === activeSourceSiteId;
+    })
+    .map((row) => ({
+      channel: {
+        ...row.route_channels,
+        sourceModel: normalizeChannelSourceModel(row.route_channels.sourceModel)
+          || fallbackSourceModelByRouteId.get(row.route_channels.routeId)
+          || null,
+      },
+      account: row.accounts,
+      site: row.sites,
+      token: row.account_tokens,
+      routeUnit: row.route_channels.oauthRouteUnitId
+        ? (routeUnitSummaries.get(row.route_channels.oauthRouteUnitId) || null)
+        : null,
+      routeUnitMembers: row.route_channels.oauthRouteUnitId
+        ? (routeUnitMembersByUnitId.get(row.route_channels.oauthRouteUnitId) || []).map((member) => ({
+          member: member.member,
+          account: member.account,
+          site: member.site,
+          token: null,
+        }))
+        : [],
+    }));
 
-  const match = { route, channels: mapped };
+  const match = { route, selectionRoute, activeSourceSiteId, channels: mapped };
   routeMatchCache.set(route.id, {
     loadedAt: nowMs,
     match,
@@ -1559,6 +1569,10 @@ function resolveActualModelForSelectedChannel(
 
 function resolveRouteStrategy(route: RouteRow): RouteRoutingStrategy {
   return normalizeRouteRoutingStrategy(route.routingStrategy);
+}
+
+function resolveRouteMatchStrategy(match: RouteMatch): RouteRoutingStrategy {
+  return resolveRouteStrategy(match.selectionRoute ?? match.route);
 }
 
 function parseIsoTimeMs(value?: string | null): number | null {
@@ -2037,7 +2051,7 @@ export class TokenRouter {
     const bypassSourceModelCheck = (options.bypassSourceModelCheck ?? false) || requestedByDisplayName;
     const useChannelSourceModelForCost = (options.useChannelSourceModelForCost ?? false) || requestedByDisplayName;
     const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
-    const routeStrategy = resolveRouteStrategy(match.route);
+    const routeStrategy = resolveRouteMatchStrategy(match);
     const runtimeModelResolver = requestedByDisplayName
       ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
       : mappedModel;
@@ -2901,7 +2915,7 @@ export class TokenRouter {
     const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
     const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
     const bypassSourceModelCheck = requestedByDisplayName;
-    const routeStrategy = resolveRouteStrategy(match.route);
+    const routeStrategy = resolveRouteMatchStrategy(match);
     const runtimeModelResolver = requestedByDisplayName
       ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
       : mappedModel;
@@ -3036,7 +3050,7 @@ export class TokenRouter {
     const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
     const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
     const bypassSourceModelCheck = requestedByDisplayName;
-    const routeStrategy = resolveRouteStrategy(match.route);
+    const routeStrategy = resolveRouteMatchStrategy(match);
     const runtimeModelResolver = requestedByDisplayName
       ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
       : mappedModel;
@@ -3478,6 +3492,11 @@ export class TokenRouter {
       mappedModel,
       selected.channel.sourceModel,
     );
+    const dispatchRoute = (
+      isSwitchGroupRoute(match.route) && match.route.customHeaderTemplateId
+        ? match.route
+        : (match.selectionRoute ?? match.route)
+    );
 
     return {
       ...dispatchCandidate,
@@ -3485,9 +3504,9 @@ export class TokenRouter {
       tokenValue,
       tokenName: dispatchCandidate.token?.name || 'default',
       actualModel,
-      routeCustomHeaders: match.route.customHeaders ?? null,
-      routeHeaderTemplateId: match.route.customHeaderTemplateId ?? null,
-      routeHeaderTemplateHeaders: match.route.routeHeaderTemplateHeaders ?? null,
+      routeCustomHeaders: dispatchRoute.customHeaders ?? null,
+      routeHeaderTemplateId: dispatchRoute.customHeaderTemplateId ?? null,
+      routeHeaderTemplateHeaders: dispatchRoute.routeHeaderTemplateHeaders ?? null,
     };
   }
 

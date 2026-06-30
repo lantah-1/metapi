@@ -75,6 +75,7 @@ export type RouteRow = {
   routeMode?: RouteMode | null;
   sourceRouteIds?: number[];
   activeSourceRouteId?: number | null;
+  activeSourceSiteId?: number | null;
   modelMapping?: string | null;
   customHeaderTemplateId?: number | null;
   customHeaders?: string | null;
@@ -93,6 +94,7 @@ export type RouteSummaryRow = {
   routeMode?: RouteMode | null;
   sourceRouteIds?: number[];
   activeSourceRouteId?: number | null;
+  activeSourceSiteId?: number | null;
   modelMapping: string | null;
   customHeaderTemplateId?: number | null;
   customHeaders?: string | null;
@@ -105,6 +107,8 @@ export type RouteSummaryRow = {
     id?: number | null;
     name: string;
     status: string;
+    channelCount?: number;
+    enabledChannelCount?: number;
   }>;
   decisionSnapshot: RouteDecision | null;
   decisionRefreshedAt: string | null;

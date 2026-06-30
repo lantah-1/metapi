@@ -127,12 +127,17 @@ describe('TokenRouter patterns and model mapping', () => {
     displayName: string,
     sourceRouteIds: number[],
     activeSourceRouteId: number,
+    options?: { customHeaderTemplateId?: number | null; activeSourceSiteId?: number | null },
   ) {
     const route = await db.insert(schema.tokenRoutes).values({
       modelPattern: displayName,
       displayName,
       routeMode: 'switch_group',
-      modelMapping: JSON.stringify({ activeSourceRouteId }),
+      modelMapping: JSON.stringify({
+        activeSourceRouteId,
+        ...(options?.activeSourceSiteId ? { activeSourceSiteId: options.activeSourceSiteId } : {}),
+      }),
+      customHeaderTemplateId: options?.customHeaderTemplateId ?? null,
       routingStrategy: 'stable_first',
       enabled: true,
     }).returning().get();
@@ -284,18 +289,57 @@ describe('TokenRouter patterns and model mapping', () => {
     expect(selected?.routeCustomHeaders).toBe(JSON.stringify({ 'x-group': 'gpt' }));
   });
 
-  it('routes a switch group through the active group or source target', async () => {
+  it('uses the active target headers when switch group has no header template', async () => {
+    const source = await createRouteWithSingleChannel('gpt-5.5');
+    await db.update(schema.tokenRoutes).set({
+      customHeaders: JSON.stringify({ 'x-target': 'group' }),
+    }).where(eq(schema.tokenRoutes.id, source.route.id)).run();
+    const switchGroup = await createSwitchGroupRoute('gpt-switch', [source.route.id], source.route.id);
+    await db.update(schema.tokenRoutes).set({
+      customHeaders: JSON.stringify({ 'x-switch': 'ignored' }),
+    }).where(eq(schema.tokenRoutes.id, switchGroup.id)).run();
+    invalidateTokenRouterCache();
+    const router = new TokenRouter();
+
+    const selected = await router.selectChannel('gpt-switch');
+
+    expect(selected).toBeTruthy();
+    expect(selected?.routeCustomHeaders).toBe(JSON.stringify({ 'x-target': 'group' }));
+  });
+
+  it('uses switch-group header template ahead of active target headers when selected', async () => {
+    const source = await createRouteWithSingleChannel('gpt-5.5');
+    const switchTemplate = await db.insert(schema.routeHeaderTemplates).values({
+      name: 'Switch Header',
+      headers: JSON.stringify({ 'x-switch-template': 'switch' }),
+    }).returning().get();
+    await db.update(schema.tokenRoutes).set({
+      customHeaders: JSON.stringify({ 'x-target': 'group' }),
+    }).where(eq(schema.tokenRoutes.id, source.route.id)).run();
+    await createSwitchGroupRoute('gpt-switch', [source.route.id], source.route.id, {
+      customHeaderTemplateId: switchTemplate.id,
+    });
+    const router = new TokenRouter();
+
+    const selected = await router.selectChannel('gpt-switch');
+
+    expect(selected).toBeTruthy();
+    expect(selected?.routeHeaderTemplateId).toBe(switchTemplate.id);
+    expect(selected?.routeHeaderTemplateHeaders).toBe(JSON.stringify({ 'x-switch-template': 'switch' }));
+    expect(selected?.routeCustomHeaders).toBeNull();
+  });
+
+  it('routes a switch group directly through the active exact target', async () => {
     const gptSource = await createRouteWithSingleChannel('openai/gpt-5.5', undefined, {
       sourceModel: 'openai/gpt-5.5',
     });
     const claudeSource = await createRouteWithSingleChannel('anthropic/claude-sonnet', undefined, {
       sourceModel: 'anthropic/claude-sonnet',
     });
-    const gptGroup = await createExplicitGroupRoute('gpt-5.5', [gptSource.route.id]);
     const switchGroup = await createSwitchGroupRoute(
       'custom',
-      [gptGroup.id, claudeSource.route.id],
-      gptGroup.id,
+      [gptSource.route.id, claudeSource.route.id],
+      gptSource.route.id,
     );
     const router = new TokenRouter();
 
@@ -303,7 +347,7 @@ describe('TokenRouter patterns and model mapping', () => {
     expect(initial).toBeTruthy();
     expect(initial?.channel.routeId).toBe(gptSource.route.id);
     expect(initial?.actualModel).toBe('openai/gpt-5.5');
-    await expect(router.getAvailableModels()).resolves.toEqual(expect.arrayContaining(['custom', 'gpt-5.5']));
+    await expect(router.getAvailableModels()).resolves.toEqual(expect.arrayContaining(['custom']));
 
     await db.update(schema.tokenRoutes).set({
       modelMapping: JSON.stringify({ activeSourceRouteId: claudeSource.route.id }),
@@ -317,5 +361,139 @@ describe('TokenRouter patterns and model mapping', () => {
     expect(switched?.actualModel).toBe('anthropic/claude-sonnet');
     expect(decision.routeId).toBe(switchGroup.id);
     expect(decision.actualModel).toBe('anthropic/claude-sonnet');
+  });
+
+  it('limits a switch group active target to the selected supplier site', async () => {
+    const siteA = await createSite('supplier-a');
+    const accountA = await createAccount(siteA.id, 'supplier-a-user');
+    const siteB = await createSite('supplier-b');
+    const accountB = await createAccount(siteB.id, 'supplier-b-user');
+    const siteC = await createSite('supplier-c');
+    const accountC = await createAccount(siteC.id, 'supplier-c-user');
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.5',
+      enabled: true,
+      routingStrategy: 'weighted',
+    }).returning().get();
+    const channelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      sourceModel: 'gpt-5.5',
+      priority: 0,
+      weight: 100,
+      enabled: true,
+    }).returning().get();
+    const channelB = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountB.id,
+      tokenId: null,
+      sourceModel: 'gpt-5.5',
+      priority: 0,
+      weight: 1,
+      enabled: true,
+    }).returning().get();
+    const channelC = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountC.id,
+      tokenId: null,
+      sourceModel: 'gpt-5.5',
+      priority: 0,
+      weight: 100,
+      enabled: true,
+    }).returning().get();
+    const switchGroup = await createSwitchGroupRoute('custom-gpt', [route.id], route.id, {
+      activeSourceSiteId: siteB.id,
+    });
+    invalidateTokenRouterCache();
+    const router = new TokenRouter();
+
+    const selected = await router.selectChannel('custom-gpt');
+    const decision = await router.explainSelection('custom-gpt');
+
+    expect(selected).toBeTruthy();
+    expect(selected?.channel.id).toBe(channelB.id);
+    expect(selected?.site.id).toBe(siteB.id);
+    expect(decision.routeId).toBe(switchGroup.id);
+    expect(decision.candidates.map((candidate) => candidate.channelId)).toEqual([channelB.id]);
+    expect(decision.candidates.some((candidate) => candidate.channelId === channelA.id)).toBe(false);
+    expect(decision.candidates.some((candidate) => candidate.channelId === channelC.id)).toBe(false);
+  });
+
+  it('does not expand an active explicit group target for switch groups', async () => {
+    const source = await createRouteWithSingleChannel('openai/gpt-5.5', undefined, {
+      sourceModel: 'openai/gpt-5.5',
+    });
+    const grouped = await createExplicitGroupRoute('gpt-public', [source.route.id]);
+    await createSwitchGroupRoute('gpt-switch', [grouped.id], grouped.id);
+    const router = new TokenRouter();
+
+    const selected = await router.selectChannel('gpt-switch');
+
+    expect(selected).toBeNull();
+  });
+
+  it('uses the active target strategy instead of the switch group strategy', async () => {
+    const active = await createRouteWithSingleChannel('any-gpt-5.5', undefined, {
+      sourceModel: 'any-gpt-5.5',
+    });
+    await db.update(schema.tokenRoutes).set({
+      routingStrategy: 'round_robin',
+    }).where(eq(schema.tokenRoutes.id, active.route.id)).run();
+    await db.update(schema.routeChannels).set({
+      failCount: 1,
+      lastFailAt: new Date().toISOString(),
+      lastSelectedAt: '2024-01-01T00:00:00.000Z',
+    }).where(eq(schema.routeChannels.id, active.channel.id)).run();
+
+    const secondSite = await createSite('switch-strategy-site');
+    const secondAccount = await createAccount(secondSite.id, 'switch-strategy-user');
+    const secondChannel = await db.insert(schema.routeChannels).values({
+      routeId: active.route.id,
+      accountId: secondAccount.id,
+      tokenId: null,
+      sourceModel: 'any-gpt-5.5',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      lastSelectedAt: '2025-01-01T00:00:00.000Z',
+    }).returning().get();
+
+    await createSwitchGroupRoute('custom-gpt', [active.route.id], active.route.id);
+    invalidateTokenRouterCache();
+    const router = new TokenRouter();
+
+    const selected = await router.selectChannel('custom-gpt');
+    const decision = await router.explainSelection('custom-gpt');
+
+    expect(selected?.channel.id).toBe(active.channel.id);
+    expect(selected?.channel.id).not.toBe(secondChannel.id);
+    expect(decision.summary).toContain('路由策略：轮询');
+  });
+
+  it('does not fall through to another switch target when the active exact target is unavailable', async () => {
+    const active = await createRouteWithSingleChannel('any-gpt-5.5', undefined, {
+      sourceModel: 'any-gpt-5.5',
+    });
+    await db.update(schema.routeChannels).set({
+      enabled: false,
+    }).where(eq(schema.routeChannels.id, active.channel.id)).run();
+    const fallback = await createRouteWithSingleChannel('openai/gpt-5.5', undefined, {
+      sourceModel: 'openai/gpt-5.5',
+    });
+    await createSwitchGroupRoute(
+      'custom-gpt',
+      [active.route.id, fallback.route.id],
+      active.route.id,
+    );
+    invalidateTokenRouterCache();
+    const router = new TokenRouter();
+
+    const selected = await router.selectChannel('custom-gpt');
+    const decision = await router.explainSelection('custom-gpt');
+
+    expect(selected).toBeNull();
+    expect(decision.candidates.some((candidate) => candidate.channelId === fallback.channel.id)).toBe(false);
+    expect(decision.summary).toContain('没有可用通道（全部被禁用、站点不可用、冷却或令牌不可用）');
   });
 });

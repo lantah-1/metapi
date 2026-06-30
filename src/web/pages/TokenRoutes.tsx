@@ -58,9 +58,30 @@ type GroupForm = {
   routingStrategy: RouteRoutingStrategy;
   sourceRouteIds: number[];
   activeSourceRouteId: number | null;
+  activeSourceSiteId: number | null;
   customHeaderTemplateId: number | null;
   customHeaders: CustomHeaderField[];
   enabled: boolean;
+};
+
+type SwitchTargetSourceKind = 'group' | 'provider';
+
+type SwitchTargetSourceOption = {
+  value: string;
+  kind: SwitchTargetSourceKind;
+  label: string;
+  description: string;
+  targets: SwitchTargetOption[];
+};
+
+type SwitchTargetOption = {
+  value: string;
+  route: RouteSummaryRow;
+  siteId: number | null;
+  supplierName: string;
+  supplierStatus: string;
+  supplierChannelCount: number;
+  supplierEnabledChannelCount: number;
 };
 
 const EMPTY_FORM: GroupForm = {
@@ -70,6 +91,7 @@ const EMPTY_FORM: GroupForm = {
   routingStrategy: 'stable_first',
   sourceRouteIds: [],
   activeSourceRouteId: null,
+  activeSourceSiteId: null,
   customHeaderTemplateId: null,
   customHeaders: [emptyCustomHeaderField()],
   enabled: true,
@@ -158,6 +180,7 @@ function buildGroupForm(route?: RouteSummaryRow | null): GroupForm {
     routingStrategy: normalizeRouteRoutingStrategyValue(route.routingStrategy),
     sourceRouteIds: [...(route.sourceRouteIds || [])],
     activeSourceRouteId,
+    activeSourceSiteId: route.activeSourceSiteId ?? null,
     customHeaderTemplateId: route.customHeaderTemplateId ?? null,
     customHeaders: parseCustomHeadersForEditor(route.customHeaders),
     enabled: route.enabled,
@@ -183,10 +206,22 @@ function countSerializedHeaders(raw: unknown): number {
   return countHeaderFields(parseCustomHeadersForEditor(raw));
 }
 
-function getSupplierStatuses(route: RouteSummaryRow): Array<{ key: string; name: string; status: string }> {
+function getSupplierStatuses(route: RouteSummaryRow): Array<{
+  key: string;
+  name: string;
+  status: string;
+  channelCount: number;
+  enabledChannelCount: number;
+}> {
   if (Array.isArray(route.siteStatuses) && route.siteStatuses.length > 0) {
     const seen = new Set<string>();
-    const suppliers: Array<{ key: string; name: string; status: string }> = [];
+    const suppliers: Array<{
+      key: string;
+      name: string;
+      status: string;
+      channelCount: number;
+      enabledChannelCount: number;
+    }> = [];
     for (const item of route.siteStatuses) {
       const name = String(item?.name || '').trim();
       if (!name) continue;
@@ -194,10 +229,18 @@ function getSupplierStatuses(route: RouteSummaryRow): Array<{ key: string; name:
       const key = id != null ? `site:${id}` : `name:${name.toLowerCase()}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const fallbackChannelCount = route.siteStatuses.length === 1 ? route.channelCount : 0;
+      const fallbackEnabledChannelCount = route.siteStatuses.length === 1 ? route.enabledChannelCount : 0;
       suppliers.push({
         key,
         name,
         status: String(item.status || 'active').trim() || 'active',
+        channelCount: typeof item.channelCount === 'number' && Number.isFinite(item.channelCount)
+          ? Math.max(0, Math.trunc(item.channelCount))
+          : fallbackChannelCount,
+        enabledChannelCount: typeof item.enabledChannelCount === 'number' && Number.isFinite(item.enabledChannelCount)
+          ? Math.max(0, Math.trunc(item.enabledChannelCount))
+          : fallbackEnabledChannelCount,
       });
     }
     return suppliers;
@@ -207,6 +250,8 @@ function getSupplierStatuses(route: RouteSummaryRow): Array<{ key: string; name:
     key: `name:${name.toLowerCase()}`,
     name,
     status: 'active',
+    channelCount: 0,
+    enabledChannelCount: 0,
   }));
 }
 
@@ -224,11 +269,6 @@ function getSourceTargetTypeLabel(route: RouteSummaryRow): string {
   return isPublicGroupRoute(route) ? '普通分组' : '供应商单模型';
 }
 
-function getSourceTargetTypeShortLabel(route: RouteSummaryRow): string {
-  if (isSwitchGroupRoute(route)) return '切换';
-  return isPublicGroupRoute(route) ? '分组' : '单模';
-}
-
 function getSourceTargetSupplierSummary(route: RouteSummaryRow): string {
   const suppliers = getSupplierNames(route);
   if (suppliers.length <= 0) return '';
@@ -244,12 +284,206 @@ function getSourceTargetDescription(route: RouteSummaryRow): string {
   ].filter(Boolean).join(' / ');
 }
 
-function getSourceTargetTypePill(route: RouteSummaryRow): ReactNode {
+function getSwitchTargetModelDescription(route: RouteSummaryRow): string {
+  return [
+    '精确模型',
+    formatCount(route.enabledChannelCount, '可用通道'),
+  ].join(' / ');
+}
+
+function getSwitchGroupTargetRoutes(
+  routes: RouteSummaryRow[],
+  currentRouteId?: number | null,
+): RouteSummaryRow[] {
+  return routes
+    .filter((route) => !isSwitchGroupRoute(route) && route.id !== currentRouteId)
+    .sort((left, right) => (
+      getSourceTargetLabel(left).localeCompare(getSourceTargetLabel(right), undefined, { sensitivity: 'base' })
+    ));
+}
+
+function getSwitchTargetModelTypePill(): ReactNode {
   return (
-    <span className={`model-group-target-kind-pill ${isPublicGroupRoute(route) ? 'is-group' : 'is-model'}`.trim()}>
-      {getSourceTargetTypeShortLabel(route)}
+    <span className="model-group-target-kind-pill is-model">
+      模型
     </span>
   );
+}
+
+function getSwitchSourceKindPill(kind: SwitchTargetSourceKind): ReactNode {
+  return (
+    <span className={`model-group-target-kind-pill ${kind === 'provider' ? 'is-provider' : 'is-group'}`.trim()}>
+      {kind === 'provider' ? '供应商' : '分组'}
+    </span>
+  );
+}
+
+function getSwitchGroupSourceValue(routeId: number): string {
+  return `group:${routeId}`;
+}
+
+function getSwitchProviderSourceValue(supplierKey: string): string {
+  return `provider:${supplierKey}`;
+}
+
+function getSwitchTargetOptionValue(routeId: number, siteId: number | null): string {
+  return `${routeId}:${siteId ?? 'unbound'}`;
+}
+
+function getSwitchTargetOptionLabel(target: SwitchTargetOption): string {
+  return `${getSourceTargetLabel(target.route)} / ${target.supplierName}`;
+}
+
+function getSwitchTargetOptionDescription(target: SwitchTargetOption): string {
+  return [
+    '精确模型',
+    formatCount(target.supplierEnabledChannelCount, '可用通道'),
+    target.supplierStatus === 'disabled' ? '供应商已禁用' : '指定供应商',
+  ].join(' / ');
+}
+
+function createSwitchTargetOptionsForRoute(route: RouteSummaryRow): SwitchTargetOption[] {
+  const suppliers = getSupplierStatuses(route);
+  const effectiveSuppliers = suppliers.length > 0
+    ? suppliers
+    : [{
+      key: 'unbound',
+      name: '未绑定供应商',
+      status: 'active',
+      channelCount: route.channelCount,
+      enabledChannelCount: route.enabledChannelCount,
+    }];
+  return effectiveSuppliers.map((supplier) => {
+    const rawSiteId = supplier.key.startsWith('site:')
+      ? Number(supplier.key.slice('site:'.length))
+      : null;
+    const siteId = typeof rawSiteId === 'number' && Number.isFinite(rawSiteId) && rawSiteId > 0
+      ? Math.trunc(rawSiteId)
+      : null;
+    return {
+      value: getSwitchTargetOptionValue(route.id, siteId),
+      route,
+      siteId,
+      supplierName: supplier.name,
+      supplierStatus: supplier.status,
+      supplierChannelCount: supplier.channelCount,
+      supplierEnabledChannelCount: supplier.enabledChannelCount,
+    };
+  });
+}
+
+function getSwitchTargetSourceValue(route: RouteSummaryRow): string {
+  if (isPublicGroupRoute(route)) return getSwitchGroupSourceValue(route.id);
+  const suppliers = getSupplierStatuses(route);
+  return getSwitchProviderSourceValue(suppliers[0]?.key || 'unbound');
+}
+
+function getRoutesForSwitchTargetSource(
+  sources: SwitchTargetSourceOption[],
+  sourceValue: string,
+): SwitchTargetOption[] {
+  return sources.find((source) => source.value === sourceValue)?.targets || [];
+}
+
+function getSwitchTargetOptionForRouteAndSite(
+  targets: SwitchTargetOption[],
+  routeId: number | null | undefined,
+  siteId: number | null | undefined,
+): SwitchTargetOption | null {
+  if (!routeId) return null;
+  return targets.find((target) => (
+    target.route.id === routeId
+    && (siteId == null || target.siteId === siteId)
+  )) || targets.find((target) => target.route.id === routeId) || null;
+}
+
+function getSwitchTargetsFromSources(sources: SwitchTargetSourceOption[]): SwitchTargetOption[] {
+  const seen = new Set<string>();
+  const targets: SwitchTargetOption[] = [];
+  for (const source of sources) {
+    for (const target of source.targets) {
+      if (seen.has(target.value)) continue;
+      seen.add(target.value);
+      targets.push(target);
+    }
+  }
+  return targets;
+}
+
+function getSwitchTargetSourceOptionForRoute(
+  sources: SwitchTargetSourceOption[],
+  route: RouteSummaryRow | null,
+  siteId?: number | null,
+): SwitchTargetSourceOption | null {
+  if (!route) return null;
+  return sources.find((source) => source.targets.some((candidate) => (
+    candidate.route.id === route.id
+    && (siteId == null || candidate.siteId === siteId)
+  )))
+    || sources.find((source) => source.value === getSwitchTargetSourceValue(route))
+    || sources.find((source) => source.targets.some((candidate) => candidate.route.id === route.id))
+    || null;
+}
+
+function buildSwitchTargetSourceOptions(
+  groupTargets: RouteSummaryRow[],
+  modelTargets: RouteSummaryRow[],
+): SwitchTargetSourceOption[] {
+  const modelTargetById = new Map(modelTargets.map((route) => [route.id, route]));
+  const groupOptions = groupTargets
+    .map((route) => {
+      const routes = sortSwitchTargetsByKind((route.sourceRouteIds || [])
+        .map((routeId) => modelTargetById.get(routeId))
+        .filter((item): item is RouteSummaryRow => !!item));
+      const targets = routes.flatMap(createSwitchTargetOptionsForRoute);
+      return {
+        value: getSwitchGroupSourceValue(route.id),
+        kind: 'group' as const,
+        label: getSourceTargetLabel(route),
+        description: getSourceTargetDescription(route),
+        targets,
+      };
+    })
+    .filter((source) => source.targets.length > 0);
+
+  const providers = new Map<string, SwitchTargetSourceOption & { targetValueSet: Set<string> }>();
+  for (const route of modelTargets) {
+    for (const target of createSwitchTargetOptionsForRoute(route)) {
+      const value = getSwitchProviderSourceValue(target.siteId ? `site:${target.siteId}` : 'unbound');
+      const existing = providers.get(value);
+      if (existing) {
+        if (!existing.targetValueSet.has(target.value)) {
+          existing.targets.push(target);
+          existing.targetValueSet.add(target.value);
+        }
+        continue;
+      }
+      providers.set(value, {
+        value,
+        kind: 'provider',
+        label: target.supplierName,
+        description: '',
+        targets: [target],
+        targetValueSet: new Set([target.value]),
+      });
+    }
+  }
+
+  const providerOptions = Array.from(providers.values())
+    .map(({ targetValueSet: _targetValueSet, ...source }) => {
+      const targets = [...source.targets].sort((left, right) => (
+        getSourceTargetLabel(left.route).localeCompare(getSourceTargetLabel(right.route), undefined, { sensitivity: 'base' })
+      ));
+      const enabledChannelCount = targets.reduce((total, target) => total + target.route.enabledChannelCount, 0);
+      return {
+        ...source,
+        targets,
+        description: `${formatCount(targets.length, '模型')} / ${formatCount(enabledChannelCount, '可用通道')}`,
+      };
+    })
+    .sort((left, right) => left.label.localeCompare(right.label, undefined, { sensitivity: 'base' }));
+
+  return [...groupOptions, ...providerOptions];
 }
 
 function sourceTargetMatchesQuery(route: RouteSummaryRow, query: string): boolean {
@@ -289,10 +523,6 @@ function filterAndSortSourceTargets(
   return sortSourceTargets(routes.filter((route) => sourceTargetMatchesQuery(route, query)), selectedRouteIds);
 }
 
-function countSelectedSourceTargets(routes: RouteSummaryRow[], selectedRouteIds: Set<number>): number {
-  return routes.reduce((total, route) => total + (selectedRouteIds.has(route.id) ? 1 : 0), 0);
-}
-
 function ModelGlyph({ model, size = 20 }: { model: string; size?: number }) {
   return (
     <BrandGlyph
@@ -306,6 +536,22 @@ function ModelGlyph({ model, size = 20 }: { model: string; size?: number }) {
 
 function FieldLabel({ children }: { children: ReactNode }) {
   return <div className="model-group-field-label">{children}</div>;
+}
+
+function SourceToolIcon({ type }: { type: 'select' | 'clear' }) {
+  if (type === 'select') {
+    return (
+      <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <path d="M4.5 10.5 8 14l7.5-8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M3.5 5.5h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" opacity="0.55" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path d="M5.5 5.5 14.5 14.5M14.5 5.5 5.5 14.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
 }
 
 function BodyPortal({ children }: { children: ReactNode }) {
@@ -339,6 +585,8 @@ export default function TokenRoutes() {
   const [form, setForm] = useState<GroupForm>(EMPTY_FORM);
   const [search, setSearch] = useState('');
   const [sourceSearch, setSourceSearch] = useState('');
+  const [switchTargetSourceValue, setSwitchTargetSourceValue] = useState('');
+  const [quickSwitchSourceValueByRouteId, setQuickSwitchSourceValueByRouteId] = useState<Record<number, string>>({});
   const [expandedGroupIds, setExpandedGroupIds] = useState<number[]>([]);
   const mountedRef = useRef(true);
 
@@ -406,6 +654,14 @@ export default function TokenRoutes() {
       description: template.description || `${countSerializedHeaders(template.headers)} 个 Header`,
     })),
   ], [headerTemplates]);
+  const switchHeaderTemplateOptions = useMemo(() => [
+    { value: '', label: '不使用模板', description: '沿用当前指向目标的 Header 处理' },
+    ...headerTemplates.map((template) => ({
+      value: String(template.id),
+      label: template.name,
+      description: template.description || `${countSerializedHeaders(template.headers)} 个 Header`,
+    })),
+  ], [headerTemplates]);
   const selectedHeaderTemplate = useMemo(
     () => headerTemplates.find((template) => template.id === form.customHeaderTemplateId) || null,
     [form.customHeaderTemplateId, headerTemplates],
@@ -418,37 +674,23 @@ export default function TokenRoutes() {
     [activeQuery, exactRoutes],
   );
   const switchGroupTargetRoutes = useMemo(
-    () => groupRoutes
-      .filter((route) => !isSwitchGroupRoute(route) && route.id !== editingRouteId)
-      .sort((left, right) => (
-        getSourceTargetLabel(left).localeCompare(getSourceTargetLabel(right), undefined, { sensitivity: 'base' })
-      )),
+    () => getSwitchGroupTargetRoutes(groupRoutes, editingRouteId),
     [editingRouteId, groupRoutes],
   );
   const switchModelTargetRoutes = exactRoutes;
-  const switchTargetRoutes = useMemo(
-    () => [...switchGroupTargetRoutes, ...switchModelTargetRoutes],
+  const switchTargetSourceOptions = useMemo(
+    () => buildSwitchTargetSourceOptions(switchGroupTargetRoutes, switchModelTargetRoutes),
     [switchGroupTargetRoutes, switchModelTargetRoutes],
   );
-  const sourceCandidateRoutes = form.mode === 'switch_group' ? switchTargetRoutes : exactRoutes;
+  const sourceCandidateRoutes = exactRoutes;
 
   const filteredSourceRoutes = useMemo(
     () => filterAndSortSourceTargets(sourceCandidateRoutes, sourceSearch, selectedSourceIdSet),
     [selectedSourceIdSet, sourceCandidateRoutes, sourceSearch],
   );
-  const filteredSwitchGroupTargetRoutes = useMemo(
-    () => filterAndSortSourceTargets(switchGroupTargetRoutes, sourceSearch, selectedSourceIdSet),
-    [selectedSourceIdSet, sourceSearch, switchGroupTargetRoutes],
-  );
-  const filteredSwitchModelTargetRoutes = useMemo(
-    () => filterAndSortSourceTargets(switchModelTargetRoutes, sourceSearch, selectedSourceIdSet),
-    [selectedSourceIdSet, sourceSearch, switchModelTargetRoutes],
-  );
   const visibleSourceRoutes = useMemo(
-    () => (form.mode === 'switch_group'
-      ? [...filteredSwitchGroupTargetRoutes, ...filteredSwitchModelTargetRoutes]
-      : filteredSourceRoutes),
-    [filteredSourceRoutes, filteredSwitchGroupTargetRoutes, filteredSwitchModelTargetRoutes, form.mode],
+    () => filteredSourceRoutes,
+    [filteredSourceRoutes],
   );
 
   const filteredGroups = useMemo(() => {
@@ -484,11 +726,26 @@ export default function TokenRoutes() {
       .filter((route): route is RouteSummaryRow => !!route),
     [form.sourceRouteIds, routeById],
   );
-  const selectedSwitchTargetRoutes = useMemo(
-    () => sortSwitchTargetsByKind(selectedSourceRoutes),
-    [selectedSourceRoutes],
-  );
   const activeTargetRoute = form.activeSourceRouteId ? routeById.get(form.activeSourceRouteId) || null : null;
+  const activeSwitchTargetSourceOption = getSwitchTargetSourceOptionForRoute(
+    switchTargetSourceOptions,
+    activeTargetRoute,
+    form.activeSourceSiteId,
+  );
+  const selectedSwitchTargetSourceValue = switchTargetSourceValue
+    || activeSwitchTargetSourceOption?.value
+    || '';
+  const selectedSwitchTargetSourceTargets = useMemo(
+    () => getRoutesForSwitchTargetSource(switchTargetSourceOptions, selectedSwitchTargetSourceValue),
+    [selectedSwitchTargetSourceValue, switchTargetSourceOptions],
+  );
+  const activeSwitchTarget = getSwitchTargetOptionForRouteAndSite(
+    selectedSwitchTargetSourceTargets.length > 0
+      ? selectedSwitchTargetSourceTargets
+      : getSwitchTargetsFromSources(switchTargetSourceOptions),
+    activeTargetRoute?.id ?? null,
+    form.activeSourceSiteId,
+  );
 
   const totalMemberRoutes = groupRoutes.reduce((total, route) => total + (route.sourceRouteIds?.length || 0), 0);
   const totalEnabledGroups = groupRoutes.filter((route) => route.enabled).length;
@@ -497,13 +754,21 @@ export default function TokenRoutes() {
     setEditingRouteId(null);
     setForm(EMPTY_FORM);
     setSourceSearch('');
+    setSwitchTargetSourceValue('');
     setEditorOpen(true);
   };
 
   const startEdit = (route: RouteSummaryRow) => {
     setEditingRouteId(route.id);
-    setForm(buildGroupForm(route));
+    const nextForm = buildGroupForm(route);
+    setForm(nextForm);
     setSourceSearch('');
+    const activeTarget = nextForm.activeSourceRouteId ? routeById.get(nextForm.activeSourceRouteId) || null : null;
+    setSwitchTargetSourceValue(getSwitchTargetSourceOptionForRoute(
+      switchTargetSourceOptions,
+      activeTarget,
+      nextForm.activeSourceSiteId,
+    )?.value || '');
     setExpandedGroupIds((prev) => (prev.includes(route.id) ? prev : [...prev, route.id]));
     setEditorOpen(true);
   };
@@ -514,6 +779,7 @@ export default function TokenRoutes() {
     setEditingRouteId(null);
     setForm(EMPTY_FORM);
     setSourceSearch('');
+    setSwitchTargetSourceValue('');
   };
 
   useEffect(() => {
@@ -530,27 +796,47 @@ export default function TokenRoutes() {
       setEditingRouteId(null);
       setForm(EMPTY_FORM);
       setSourceSearch('');
+      setSwitchTargetSourceValue('');
     };
     globalThis.addEventListener('keydown', handleKeyDown);
     return () => globalThis.removeEventListener('keydown', handleKeyDown);
   }, [editorOpen, saving]);
 
   const updateGroupMode = (mode: GroupForm['mode']) => {
+    if (mode !== 'switch_group') {
+      setSwitchTargetSourceValue('');
+    } else {
+      const nextSwitchTargetId = form.activeSourceRouteId && form.sourceRouteIds.includes(form.activeSourceRouteId)
+        ? form.activeSourceRouteId
+        : (form.sourceRouteIds[0] ?? null);
+      const nextTarget = nextSwitchTargetId ? routeById.get(nextSwitchTargetId) || null : null;
+      setSwitchTargetSourceValue(getSwitchTargetSourceOptionForRoute(
+        switchTargetSourceOptions,
+        nextTarget,
+        form.activeSourceSiteId,
+      )?.value || '');
+    }
     setForm((prev) => {
       if (prev.mode === mode) return prev;
+      const nextSwitchTargetId = mode === 'switch_group'
+        ? (prev.activeSourceRouteId && prev.sourceRouteIds.includes(prev.activeSourceRouteId)
+          ? prev.activeSourceRouteId
+          : (prev.sourceRouteIds[0] ?? null))
+        : null;
       const sourceRouteIds = mode === 'explicit_group'
         ? prev.sourceRouteIds.filter((routeId) => exactRouteIdSet.has(routeId))
-        : prev.sourceRouteIds;
+        : (nextSwitchTargetId ? [nextSwitchTargetId] : []);
       const activeSourceRouteId = mode === 'switch_group'
-        ? (prev.activeSourceRouteId && sourceRouteIds.includes(prev.activeSourceRouteId)
-          ? prev.activeSourceRouteId
-          : (sourceRouteIds[0] ?? null))
+        ? nextSwitchTargetId
         : null;
       return {
         ...prev,
         mode,
         sourceRouteIds,
         activeSourceRouteId,
+        activeSourceSiteId: mode === 'switch_group' ? prev.activeSourceSiteId : null,
+        customHeaderTemplateId: prev.customHeaderTemplateId,
+        customHeaders: mode === 'switch_group' ? [emptyCustomHeaderField()] : prev.customHeaders,
       };
     });
   };
@@ -601,27 +887,31 @@ export default function TokenRoutes() {
     }
     setForm((prev) => ({
       ...prev,
-      sourceRouteIds: autoMatchedIds,
-      activeSourceRouteId: prev.mode === 'switch_group' ? (autoMatchedIds[0] ?? null) : prev.activeSourceRouteId,
+        sourceRouteIds: prev.mode === 'switch_group' ? (autoMatchedIds[0] ? [autoMatchedIds[0]] : []) : autoMatchedIds,
+        activeSourceRouteId: prev.mode === 'switch_group' ? (autoMatchedIds[0] ?? null) : prev.activeSourceRouteId,
+        activeSourceSiteId: prev.mode === 'switch_group' ? null : prev.activeSourceSiteId,
     }));
     toast.success(`已匹配 ${autoMatchedIds.length} 个来源模型`);
   };
 
   const toggleSourceRoute = (routeId: number) => {
     setForm((prev) => {
+      if (prev.mode === 'switch_group') {
+        return {
+          ...prev,
+          sourceRouteIds: [routeId],
+          activeSourceRouteId: routeId,
+          activeSourceSiteId: null,
+        };
+      }
       const next = new Set(prev.sourceRouteIds);
       if (next.has(routeId)) next.delete(routeId);
       else next.add(routeId);
       const sourceRouteIds = Array.from(next);
-      const activeSourceRouteId = prev.mode === 'switch_group'
-        ? (prev.activeSourceRouteId && sourceRouteIds.includes(prev.activeSourceRouteId)
-          ? prev.activeSourceRouteId
-          : (sourceRouteIds[0] ?? null))
-        : prev.activeSourceRouteId;
       return {
         ...prev,
         sourceRouteIds,
-        activeSourceRouteId,
+        activeSourceRouteId: prev.activeSourceRouteId,
       };
     });
   };
@@ -632,18 +922,24 @@ export default function TokenRoutes() {
     ));
     if (normalizedRouteIds.length === 0) return;
     setForm((prev) => {
+      if (prev.mode === 'switch_group') {
+        const targetRouteId = normalizedRouteIds[0] ?? null;
+        return targetRouteId
+          ? {
+            ...prev,
+            sourceRouteIds: [targetRouteId],
+            activeSourceRouteId: targetRouteId,
+            activeSourceSiteId: null,
+          }
+          : prev;
+      }
       const next = new Set(prev.sourceRouteIds);
       for (const routeId of normalizedRouteIds) next.add(routeId);
       const sourceRouteIds = Array.from(next);
-      const activeSourceRouteId = prev.mode === 'switch_group'
-        ? (prev.activeSourceRouteId && sourceRouteIds.includes(prev.activeSourceRouteId)
-          ? prev.activeSourceRouteId
-          : (normalizedRouteIds[0] ?? sourceRouteIds[0] ?? null))
-        : prev.activeSourceRouteId;
       return {
         ...prev,
         sourceRouteIds,
-        activeSourceRouteId,
+        activeSourceRouteId: prev.activeSourceRouteId,
       };
     });
   };
@@ -653,7 +949,41 @@ export default function TokenRoutes() {
       ...prev,
       sourceRouteIds: [],
       activeSourceRouteId: prev.mode === 'switch_group' ? null : prev.activeSourceRouteId,
+      activeSourceSiteId: prev.mode === 'switch_group' ? null : prev.activeSourceSiteId,
     }));
+  };
+
+  const selectSwitchTargetSource = (sourceValue: string) => {
+    setSwitchTargetSourceValue(sourceValue);
+    setForm((prev) => {
+      if (prev.mode !== 'switch_group') return prev;
+      return {
+        ...prev,
+        sourceRouteIds: [],
+        activeSourceRouteId: null,
+        activeSourceSiteId: null,
+      };
+    });
+  };
+
+  const selectSwitchTargetModel = (targetValue: string) => {
+    const target = selectedSwitchTargetSourceTargets.find((item) => item.value === targetValue) || null;
+    if (!target) return;
+    const targetRoute = target.route;
+    const currentSourceTargets = getRoutesForSwitchTargetSource(switchTargetSourceOptions, selectedSwitchTargetSourceValue);
+    const sourceOption = currentSourceTargets.some((item) => item.value === targetValue)
+      ? null
+      : getSwitchTargetSourceOptionForRoute(switchTargetSourceOptions, targetRoute);
+    if (sourceOption && !selectedSwitchTargetSourceValue) setSwitchTargetSourceValue(sourceOption.value);
+    setForm((prev) => {
+      if (prev.mode !== 'switch_group') return prev;
+      return {
+        ...prev,
+        sourceRouteIds: [targetRoute.id],
+        activeSourceRouteId: targetRoute.id,
+        activeSourceSiteId: target.siteId,
+      };
+    });
   };
 
   const updateHeaderField = (index: number, patch: Partial<CustomHeaderField>) => {
@@ -689,24 +1019,27 @@ export default function TokenRoutes() {
       return;
     }
 
-    const sourceRouteIds = form.sourceRouteIds.length > 0
-      ? form.sourceRouteIds
-      : autoMatchedIds;
+    const activeSourceRouteId = form.mode === 'switch_group'
+      ? (form.activeSourceRouteId ?? form.sourceRouteIds[0] ?? null)
+      : null;
+    const sourceRouteIds = form.mode === 'switch_group'
+      ? (activeSourceRouteId ? [activeSourceRouteId] : [])
+      : (form.sourceRouteIds.length > 0 ? form.sourceRouteIds : autoMatchedIds);
     if (sourceRouteIds.length === 0) {
-      toast.error(form.mode === 'switch_group' ? '请至少添加一个入口目标' : '请至少添加一个来源模型');
+      toast.error(form.mode === 'switch_group' ? '请选择指向目标' : '请至少添加一个来源模型');
       return;
     }
-    const activeSourceRouteId = form.mode === 'switch_group'
-      ? (form.activeSourceRouteId && sourceRouteIds.includes(form.activeSourceRouteId)
-        ? form.activeSourceRouteId
-        : (sourceRouteIds[0] ?? null))
-      : null;
     if (form.mode === 'switch_group' && !activeSourceRouteId) {
       toast.error('请选择当前指向的入口目标');
       return;
     }
+    const activeSourceSiteId = form.mode === 'switch_group'
+      ? (form.activeSourceSiteId ?? activeSwitchTarget?.siteId ?? null)
+      : null;
 
-    const serializedHeaders = serializeCustomHeaders(form.customHeaders);
+    const serializedHeaders = form.mode === 'switch_group'
+      ? { valid: true, customHeaders: null as string | null, error: null as string | null }
+      : serializeCustomHeaders(form.customHeaders);
     if (!serializedHeaders.valid) {
       toast.error(serializedHeaders.error || 'Header 配置不正确');
       return;
@@ -722,7 +1055,15 @@ export default function TokenRoutes() {
 
     setSaving(true);
     try {
-      const payload = {
+      const payload = form.mode === 'switch_group' ? {
+        routeMode: form.mode,
+        displayName: name,
+        sourceRouteIds,
+        activeSourceRouteId,
+        activeSourceSiteId,
+        customHeaderTemplateId: form.customHeaderTemplateId,
+        enabled: form.enabled,
+      } : {
         routeMode: form.mode,
         displayName: name,
         sourceRouteIds,
@@ -743,6 +1084,7 @@ export default function TokenRoutes() {
       setEditingRouteId(null);
       setForm(EMPTY_FORM);
       setSourceSearch('');
+      setSwitchTargetSourceValue('');
       setEditorOpen(false);
     } catch (error: any) {
       toast.error(error?.message || '保存模型分组失败');
@@ -784,32 +1126,77 @@ export default function TokenRoutes() {
     }
   };
 
-  const updateSwitchGroupActiveTarget = async (route: RouteSummaryRow, nextRouteId: number) => {
+  const updateSwitchGroupActiveTarget = async (route: RouteSummaryRow, nextTarget: SwitchTargetOption) => {
     if (!isSwitchGroupRoute(route)) return;
+    const nextRouteId = nextTarget.route.id;
     if (!Number.isFinite(nextRouteId) || nextRouteId <= 0) return;
-    const sourceRouteIds = route.sourceRouteIds || [];
-    if (!sourceRouteIds.includes(nextRouteId)) {
-      toast.error('当前目标不在切换分组候选范围内');
+    const nextTargetRoute = routeById.get(nextRouteId) || null;
+    if (!nextTargetRoute) {
+      toast.error('当前目标不存在');
       return;
     }
     const previousActiveSourceRouteId = typeof route.activeSourceRouteId === 'number'
       ? route.activeSourceRouteId
       : getSwitchGroupActiveSourceRouteId(route.modelMapping);
-    if (previousActiveSourceRouteId === nextRouteId) return;
+    const previousActiveSourceSiteId = route.activeSourceSiteId ?? null;
+    if (previousActiveSourceRouteId === nextRouteId && previousActiveSourceSiteId === nextTarget.siteId) return;
+    const previousSourceRouteIds = route.sourceRouteIds || [];
+    const nextSourceRouteIds = [nextRouteId];
 
     setQuickSwitchingRouteId(route.id);
     setRoutes((prev) => prev.map((item) => (
-      item.id === route.id ? { ...item, activeSourceRouteId: nextRouteId } : item
+      item.id === route.id
+        ? { ...item, sourceRouteIds: nextSourceRouteIds, activeSourceRouteId: nextRouteId, activeSourceSiteId: nextTarget.siteId }
+        : item
     )));
     try {
-      await api.updateRoute(route.id, { activeSourceRouteId: nextRouteId });
+      await api.updateRoute(route.id, {
+        sourceRouteIds: nextSourceRouteIds,
+        activeSourceRouteId: nextRouteId,
+        activeSourceSiteId: nextTarget.siteId,
+      });
       toast.success('当前指向已更新');
       await load();
     } catch (error: any) {
       setRoutes((prev) => prev.map((item) => (
-        item.id === route.id ? { ...item, activeSourceRouteId: previousActiveSourceRouteId ?? null } : item
+        item.id === route.id
+          ? {
+            ...item,
+            sourceRouteIds: previousSourceRouteIds,
+            activeSourceRouteId: previousActiveSourceRouteId ?? null,
+            activeSourceSiteId: previousActiveSourceSiteId,
+          }
+          : item
       )));
       toast.error(error?.message || '更新当前指向失败');
+    } finally {
+      setQuickSwitchingRouteId(null);
+    }
+  };
+
+  const updateSwitchGroupHeaderTemplate = async (route: RouteSummaryRow, nextTemplateId: number | null) => {
+    if (!isSwitchGroupRoute(route)) return;
+    const normalizedTemplateId = nextTemplateId && Number.isFinite(nextTemplateId) && nextTemplateId > 0
+      ? nextTemplateId
+      : null;
+    const previousTemplateId = route.customHeaderTemplateId ?? null;
+    if (previousTemplateId === normalizedTemplateId) return;
+
+    setQuickSwitchingRouteId(route.id);
+    setRoutes((prev) => prev.map((item) => (
+      item.id === route.id ? { ...item, customHeaderTemplateId: normalizedTemplateId } : item
+    )));
+    try {
+      await api.updateRoute(route.id, {
+        customHeaderTemplateId: normalizedTemplateId,
+      });
+      toast.success(normalizedTemplateId ? 'Header 模板已更新' : 'Header 模板已取消');
+      await load();
+    } catch (error: any) {
+      setRoutes((prev) => prev.map((item) => (
+        item.id === route.id ? { ...item, customHeaderTemplateId: previousTemplateId } : item
+      )));
+      toast.error(error?.message || '更新 Header 模板失败');
     } finally {
       setQuickSwitchingRouteId(null);
     }
@@ -829,25 +1216,23 @@ export default function TokenRoutes() {
   };
 
   const canSave = !!form.name.trim()
-    && (form.sourceRouteIds.length > 0 || autoMatchedIds.length > 0)
-    && (form.mode !== 'switch_group' || !!form.activeSourceRouteId || form.sourceRouteIds.length === 0)
+    && (
+      form.mode === 'switch_group'
+        ? !!form.activeSourceRouteId
+        : (form.sourceRouteIds.length > 0 || autoMatchedIds.length > 0)
+    )
     && !saving;
   const allVisibleSourcesSelected = visibleSourceRoutes.length > 0
     && visibleSourceRoutes.every((route) => selectedSourceIdSet.has(route.id));
-  const selectedSwitchGroupTargetCount = countSelectedSourceTargets(switchGroupTargetRoutes, selectedSourceIdSet);
-  const selectedSwitchModelTargetCount = countSelectedSourceTargets(switchModelTargetRoutes, selectedSourceIdSet);
-  const allVisibleSwitchGroupTargetsSelected = filteredSwitchGroupTargetRoutes.length > 0
-    && filteredSwitchGroupTargetRoutes.every((route) => selectedSourceIdSet.has(route.id));
-  const allVisibleSwitchModelTargetsSelected = filteredSwitchModelTargetRoutes.length > 0
-    && filteredSwitchModelTargetRoutes.every((route) => selectedSourceIdSet.has(route.id));
   const renderSourceRow = (route: RouteSummaryRow) => {
-    const checked = selectedSourceIdSet.has(route.id);
-    const autoMatched = autoMatchedIds.includes(route.id);
     const active = form.mode === 'switch_group' && form.activeSourceRouteId === route.id;
+    const checked = form.mode === 'switch_group' ? active : selectedSourceIdSet.has(route.id);
+    const autoMatched = autoMatchedIds.includes(route.id);
     return (
       <label key={route.id} className={`model-group-source-row ${checked ? 'is-selected' : ''}`.trim()}>
         <input
-          type="checkbox"
+          type={form.mode === 'switch_group' ? 'radio' : 'checkbox'}
+          name={form.mode === 'switch_group' ? 'switch-group-target' : undefined}
           checked={checked}
           onChange={() => toggleSourceRoute(route.id)}
         />
@@ -864,7 +1249,7 @@ export default function TokenRoutes() {
           </span>
         </span>
         {active && <span className="model-group-active-badge">当前</span>}
-        {autoMatched && <span className="model-group-auto-badge">匹配</span>}
+        {form.mode !== 'switch_group' && autoMatched && <span className="model-group-auto-badge">匹配</span>}
       </label>
     );
   };
@@ -875,13 +1260,31 @@ export default function TokenRoutes() {
       .map((routeId) => routeById.get(routeId))
       .filter((item): item is RouteSummaryRow => !!item);
     const switchGroup = isSwitchGroupRoute(route);
-    const quickSwitchTargetRoutes = switchGroup ? sortSwitchTargetsByKind(memberRoutes) : memberRoutes;
+    const quickSwitchGroupTargets = switchGroup ? getSwitchGroupTargetRoutes(groupRoutes, route.id) : [];
+    const quickSwitchSourceOptions = switchGroup
+      ? buildSwitchTargetSourceOptions(quickSwitchGroupTargets, switchModelTargetRoutes)
+      : [];
     const activeSourceRouteId = switchGroup
       ? (typeof route.activeSourceRouteId === 'number'
         ? route.activeSourceRouteId
         : getSwitchGroupActiveSourceRouteId(route.modelMapping))
       : null;
     const activeMember = activeSourceRouteId ? routeById.get(activeSourceRouteId) || null : null;
+    const activeQuickSwitchSourceOption = getSwitchTargetSourceOptionForRoute(
+      quickSwitchSourceOptions,
+      activeMember,
+      route.activeSourceSiteId ?? null,
+    );
+    const quickSwitchSourceValue = quickSwitchSourceValueByRouteId[route.id]
+      || activeQuickSwitchSourceOption?.value
+      || '';
+    const quickSwitchTargets = getRoutesForSwitchTargetSource(quickSwitchSourceOptions, quickSwitchSourceValue);
+    const allQuickSwitchTargets = getSwitchTargetsFromSources(quickSwitchSourceOptions);
+    const activeQuickSwitchTarget = getSwitchTargetOptionForRouteAndSite(
+      quickSwitchTargets.length > 0 ? quickSwitchTargets : allQuickSwitchTargets,
+      activeSourceRouteId,
+      route.activeSourceSiteId ?? null,
+    );
     const selected = route.id === editingRouteId;
     const expanded = expandedGroupIdSet.has(route.id);
     const customHeaderCount = countSerializedHeaders(route.customHeaders);
@@ -909,7 +1312,7 @@ export default function TokenRoutes() {
                 {getGroupModeLabel(route)}
               </span>
               <span aria-hidden="true">/</span>
-              {getRouteRoutingStrategyLabel(route.routingStrategy)}
+              {switchGroup ? '直接切换' : getRouteRoutingStrategyLabel(route.routingStrategy)}
               <span aria-hidden="true">/</span>
               {formatCount(memberRoutes.length, switchGroup ? '目标' : '成员')}
               <span aria-hidden="true">/</span>
@@ -917,7 +1320,7 @@ export default function TokenRoutes() {
               {switchGroup && activeMember && (
                 <>
                   <span aria-hidden="true">/</span>
-                  指向 {getSourceTargetLabel(activeMember)}
+                  指向 {activeQuickSwitchTarget ? getSwitchTargetOptionLabel(activeQuickSwitchTarget) : getSourceTargetLabel(activeMember)}
                 </>
               )}
               {hasHeaderConfig && (
@@ -935,7 +1338,7 @@ export default function TokenRoutes() {
             activeMember ? (
               <span className="model-group-member-chip is-active">
                 <ModelGlyph model={activeMember.modelPattern} size={14} />
-                当前：{getSourceTargetLabel(activeMember)}
+                当前：{activeQuickSwitchTarget ? getSwitchTargetOptionLabel(activeQuickSwitchTarget) : getSourceTargetLabel(activeMember)}
               </span>
             ) : (
               <span className="model-group-member-chip is-muted">未选择当前目标</span>
@@ -963,7 +1366,7 @@ export default function TokenRoutes() {
               <>
                 <div className="model-group-detail-header">
                   <span>当前使用</span>
-                  <span>{formatCount(memberRoutes.length, '候选')}</span>
+                  <span>{formatCount(switchModelTargetRoutes.length, '可选模型')}</span>
                 </div>
                 {activeMember ? (
                   <div className="model-group-current-target">
@@ -971,25 +1374,16 @@ export default function TokenRoutes() {
                       <ModelGlyph model={activeMember.modelPattern} size={18} />
                     </span>
                     <span className="model-group-detail-copy">
-                      <span className="model-group-detail-model">{getSourceTargetLabel(activeMember)}</span>
-                      <span className="model-group-detail-meta">
-                        {getSourceTargetTypeLabel(activeMember)}
-                        <span aria-hidden="true"> / </span>
-                        {formatCount(activeMember.enabledChannelCount, '可用通道')}
+                      <span className="model-group-detail-model">
+                        {activeQuickSwitchTarget ? getSwitchTargetOptionLabel(activeQuickSwitchTarget) : getSourceTargetLabel(activeMember)}
                       </span>
-                    </span>
-                    <span className="model-group-detail-suppliers" aria-label="供应商">
-                      {getSupplierStatuses(activeMember).length === 0 ? (
-                        <span className="model-group-supplier-chip is-muted">未绑定供应商</span>
-                      ) : getSupplierStatuses(activeMember).map((supplier) => (
-                        <span
-                          key={supplier.key}
-                          className={`model-group-supplier-chip ${supplier.status === 'disabled' ? 'is-disabled' : ''}`.trim()}
-                          title={supplier.status === 'disabled' ? `${supplier.name} 已禁用` : supplier.name}
-                        >
-                          {supplier.name}
-                        </span>
-                      ))}
+                      <span className="model-group-detail-meta">
+                        {isPublicGroupRoute(activeMember)
+                          ? `${getSourceTargetTypeLabel(activeMember)} / 请重新选择精确模型`
+                          : activeQuickSwitchTarget
+                            ? getSwitchTargetOptionDescription(activeQuickSwitchTarget)
+                            : getSwitchTargetModelDescription(activeMember)}
+                      </span>
                     </span>
                   </div>
                 ) : (
@@ -997,23 +1391,62 @@ export default function TokenRoutes() {
                 )}
                 <div className="model-group-quick-switch">
                   <FieldLabel>快速切换</FieldLabel>
-                  <ModernSelect
-                    data-testid={`model-group-quick-switch-${route.id}`}
-                    value={activeSourceRouteId ? String(activeSourceRouteId) : ''}
-                    onChange={(value) => void updateSwitchGroupActiveTarget(route, Number(value))}
-                    options={quickSwitchTargetRoutes.map((member) => ({
-                      value: String(member.id),
-                      label: getSourceTargetLabel(member),
-                      description: getSourceTargetDescription(member),
-                      iconNode: getSourceTargetTypePill(member),
-                    }))}
-                    placeholder="选择新的当前目标"
-                    disabled={quickSwitchingRouteId === route.id || memberRoutes.length === 0}
-                    searchable
-                    searchPlaceholder="搜索候选目标"
-                    emptyLabel="暂无候选目标"
-                    size="sm"
-                  />
+                  <div className="model-group-field">
+                    <FieldLabel>Header 模板</FieldLabel>
+                    <ModernSelect
+                      data-testid={`model-group-quick-switch-header-${route.id}`}
+                      value={route.customHeaderTemplateId ? String(route.customHeaderTemplateId) : ''}
+                      onChange={(value) => void updateSwitchGroupHeaderTemplate(route, value ? Number(value) : null)}
+                      options={switchHeaderTemplateOptions}
+                      placeholder="选择 Header 模板"
+                      disabled={quickSwitchingRouteId === route.id}
+                      searchable
+                      searchPlaceholder="搜索模板"
+                      emptyLabel="暂无 Header 模板"
+                      size="sm"
+                    />
+                  </div>
+                  <div className="model-group-switch-target-grid">
+                    <ModernSelect
+                      data-testid={`model-group-quick-switch-source-${route.id}`}
+                      value={quickSwitchSourceValue}
+                      onChange={(value) => {
+                        setQuickSwitchSourceValueByRouteId((prev) => ({ ...prev, [route.id]: value }));
+                      }}
+                      options={quickSwitchSourceOptions.map((source) => ({
+                        value: source.value,
+                        label: source.label,
+                        description: source.description,
+                        iconNode: getSwitchSourceKindPill(source.kind),
+                      }))}
+                      placeholder="选择分组或供应商"
+                      disabled={quickSwitchingRouteId === route.id || quickSwitchSourceOptions.length === 0}
+                      searchable
+                      searchPlaceholder="搜索分组或供应商"
+                      emptyLabel="暂无可选来源"
+                      size="sm"
+                    />
+                    <ModernSelect
+                      data-testid={`model-group-quick-switch-${route.id}`}
+                      value={activeQuickSwitchTarget?.value || ''}
+                      onChange={(value) => {
+                        const target = quickSwitchTargets.find((item) => item.value === value);
+                        if (target) void updateSwitchGroupActiveTarget(route, target);
+                      }}
+                      options={quickSwitchTargets.map((target) => ({
+                        value: target.value,
+                        label: getSwitchTargetOptionLabel(target),
+                        description: getSwitchTargetOptionDescription(target),
+                        iconNode: getSwitchTargetModelTypePill(),
+                      }))}
+                      placeholder="选择模型"
+                      disabled={quickSwitchingRouteId === route.id || !quickSwitchSourceValue}
+                      searchable
+                      searchPlaceholder="搜索模型"
+                      emptyLabel={quickSwitchSourceValue ? '暂无可选模型' : '请先选择分组或供应商'}
+                      size="sm"
+                    />
+                  </div>
                 </div>
               </>
             ) : (
@@ -1241,199 +1674,216 @@ export default function TokenRoutes() {
               </div>
             </div>
 
-            <div className="model-group-field">
-              <FieldLabel>选择策略</FieldLabel>
-              <ModernSelect
-                value={form.routingStrategy}
-                onChange={(value) => setForm((prev) => ({
-                  ...prev,
-                  routingStrategy: normalizeRouteRoutingStrategyValue(value as RouteRoutingStrategy),
-                }))}
-                options={STRATEGY_OPTIONS}
-              />
-              <div className="model-group-field-hint">
-                {getRouteRoutingStrategyDescription(form.routingStrategy)}
-              </div>
-            </div>
+            {form.mode !== 'switch_group' && (
+              <>
+                <div className="model-group-field">
+                  <FieldLabel>选择策略</FieldLabel>
+                  <ModernSelect
+                    value={form.routingStrategy}
+                    onChange={(value) => setForm((prev) => ({
+                      ...prev,
+                      routingStrategy: normalizeRouteRoutingStrategyValue(value as RouteRoutingStrategy),
+                    }))}
+                    options={STRATEGY_OPTIONS}
+                  />
+                  <div className="model-group-field-hint">
+                    {getRouteRoutingStrategyDescription(form.routingStrategy)}
+                  </div>
+                </div>
 
-            <div className="model-group-field">
-              <FieldLabel>Header 模板</FieldLabel>
-              <ModernSelect
-                value={form.customHeaderTemplateId ? String(form.customHeaderTemplateId) : ''}
-                onChange={(value) => setForm((prev) => ({
-                  ...prev,
-                  customHeaderTemplateId: value ? Number(value) : null,
-                }))}
-                options={headerTemplateOptions}
-                searchable
-                searchPlaceholder="搜索模板"
-                emptyLabel="暂无 Header 模板"
-              />
-              <div className="model-group-field-hint">
-                {selectedHeaderTemplate
-                  ? `${selectedHeaderTemplate.name} / ${countSerializedHeaders(selectedHeaderTemplate.headers)} 个 Header`
-                  : '未选择模板'}
-              </div>
-            </div>
+                <div className="model-group-field">
+                  <FieldLabel>Header 模板</FieldLabel>
+                  <ModernSelect
+                    value={form.customHeaderTemplateId ? String(form.customHeaderTemplateId) : ''}
+                    onChange={(value) => setForm((prev) => ({
+                      ...prev,
+                      customHeaderTemplateId: value ? Number(value) : null,
+                    }))}
+                    options={headerTemplateOptions}
+                    searchable
+                    searchPlaceholder="搜索模板"
+                    emptyLabel="暂无 Header 模板"
+                  />
+                  <div className="model-group-field-hint">
+                    {selectedHeaderTemplate
+                      ? `${selectedHeaderTemplate.name} / ${countSerializedHeaders(selectedHeaderTemplate.headers)} 个 Header`
+                      : '未选择模板'}
+                  </div>
+                </div>
 
-            <div className="model-group-field">
-              <div className="model-group-header-toolbar">
-                <FieldLabel>分组自定义 Header</FieldLabel>
-                <button type="button" className="btn-link" onClick={addHeaderField}>添加</button>
-              </div>
-              <div className="model-group-header-list">
-                {form.customHeaders.map((field, index) => (
-                  <div key={index} className="model-group-header-row">
+                <div className="model-group-field">
+                  <div className="model-group-header-toolbar">
+                    <FieldLabel>分组自定义 Header</FieldLabel>
+                    <button type="button" className="btn-link" onClick={addHeaderField}>添加</button>
+                  </div>
+                  <div className="model-group-header-list">
+                    {form.customHeaders.map((field, index) => (
+                      <div key={index} className="model-group-header-row">
+                        <input
+                          value={field.key}
+                          onChange={(event) => updateHeaderField(index, { key: event.target.value })}
+                          placeholder="Header 名称"
+                        />
+                        <input
+                          value={field.value}
+                          onChange={(event) => updateHeaderField(index, { value: event.target.value })}
+                          placeholder="Header 值"
+                        />
+                        <button
+                          type="button"
+                          className="btn-link btn-link-danger"
+                          onClick={() => removeHeaderField(index)}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="model-group-field-hint">
+                    当前分组配置 {countHeaderFields(form.customHeaders)} 个 Header。
+                  </div>
+                </div>
+
+                <label className="model-group-field">
+                  <FieldLabel>自动匹配关键词</FieldLabel>
+                  <div className="model-group-inline-control">
                     <input
-                      value={field.key}
-                      onChange={(event) => updateHeaderField(index, { key: event.target.value })}
-                      placeholder="Header 名称"
+                      value={form.autoQuery}
+                      onChange={(event) => setForm((prev) => ({ ...prev, autoQuery: event.target.value }))}
+                      placeholder="默认使用下游模型名"
                     />
-                    <input
-                      value={field.value}
-                      onChange={(event) => updateHeaderField(index, { value: event.target.value })}
-                      placeholder="Header 值"
-                    />
-                    <button
-                      type="button"
-                      className="btn-link btn-link-danger"
-                      onClick={() => removeHeaderField(index)}
-                    >
-                      删除
+                    <button type="button" className="btn btn-soft-primary" onClick={applyAutoMatch}>
+                      自动匹配
                     </button>
                   </div>
-                ))}
-              </div>
-              <div className="model-group-field-hint">
-                当前分组配置 {countHeaderFields(form.customHeaders)} 个 Header。
-              </div>
-            </div>
-
-            <label className="model-group-field">
-              <FieldLabel>自动匹配关键词</FieldLabel>
-              <div className="model-group-inline-control">
-                <input
-                  value={form.autoQuery}
-                  onChange={(event) => setForm((prev) => ({ ...prev, autoQuery: event.target.value }))}
-                  placeholder="默认使用下游模型名"
-                />
-                <button type="button" className="btn btn-soft-primary" onClick={applyAutoMatch}>
-                  自动匹配
-                </button>
-              </div>
-              <div className="model-group-field-hint">
-                当前可匹配 {autoMatchedIds.length} 个供应商模型。
-              </div>
-            </label>
-
-            <div className="model-group-source-toolbar">
-              <div>
-                <FieldLabel>{form.mode === 'switch_group' ? '入口目标' : '成员模型'}</FieldLabel>
-                <span>{selectedSourceRoutes.length} / {sourceCandidateRoutes.length}</span>
-              </div>
-              <div className="model-group-source-tools">
-                <button
-                  type="button"
-                  className="btn-link"
-                  onClick={() => selectSourceRoutes(visibleSourceRoutes.map((route) => route.id))}
-                  disabled={visibleSourceRoutes.length === 0 || allVisibleSourcesSelected}
-                >
-                  {allVisibleSourcesSelected ? '已全选可见' : '全选可见'}
-                </button>
-                <button
-                  type="button"
-                  className="btn-link"
-                  onClick={clearSourceRoutes}
-                  disabled={form.sourceRouteIds.length === 0}
-                >
-                  清空
-                </button>
-                <input
-                  type="search"
-                  value={sourceSearch}
-                  onChange={(event) => setSourceSearch(event.target.value)}
-                  placeholder={form.mode === 'switch_group' ? '搜索分组或供应商单模型' : '搜索来源模型'}
-                />
-              </div>
-            </div>
-
-            <div className="model-group-source-list">
-              {form.mode === 'switch_group' ? (
-                <>
-                  <section className="model-group-source-section" aria-label="普通分组">
-                    <div className="model-group-source-section-header">
-                      <div>
-                        <span className="model-group-source-section-title">普通分组</span>
-                        <span className="model-group-source-section-count">
-                          已选 {selectedSwitchGroupTargetCount} / {switchGroupTargetRoutes.length}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        className="btn-link"
-                        onClick={() => selectSourceRoutes(filteredSwitchGroupTargetRoutes.map((route) => route.id))}
-                        disabled={filteredSwitchGroupTargetRoutes.length === 0 || allVisibleSwitchGroupTargetsSelected}
-                      >
-                        {allVisibleSwitchGroupTargetsSelected ? '已全选' : '全选'}
-                      </button>
-                    </div>
-                    {filteredSwitchGroupTargetRoutes.length === 0 ? (
-                      <div className="model-group-source-empty">没有匹配的普通分组</div>
-                    ) : filteredSwitchGroupTargetRoutes.map(renderSourceRow)}
-                  </section>
-                  <section className="model-group-source-section" aria-label="供应商单模型">
-                    <div className="model-group-source-section-header">
-                      <div>
-                        <span className="model-group-source-section-title">供应商单模型</span>
-                        <span className="model-group-source-section-count">
-                          已选 {selectedSwitchModelTargetCount} / {switchModelTargetRoutes.length}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        className="btn-link"
-                        onClick={() => selectSourceRoutes(filteredSwitchModelTargetRoutes.map((route) => route.id))}
-                        disabled={filteredSwitchModelTargetRoutes.length === 0 || allVisibleSwitchModelTargetsSelected}
-                      >
-                        {allVisibleSwitchModelTargetsSelected ? '已全选' : '全选'}
-                      </button>
-                    </div>
-                    {filteredSwitchModelTargetRoutes.length === 0 ? (
-                      <div className="model-group-source-empty">没有匹配的供应商单模型</div>
-                    ) : filteredSwitchModelTargetRoutes.map(renderSourceRow)}
-                  </section>
-                </>
-              ) : filteredSourceRoutes.length === 0 ? (
-                <div className="model-group-source-empty">没有可选来源模型</div>
-              ) : filteredSourceRoutes.map(renderSourceRow)}
-            </div>
+                  <div className="model-group-field-hint">
+                    当前可匹配 {autoMatchedIds.length} 个供应商模型。
+                  </div>
+                </label>
+              </>
+            )}
 
             {form.mode === 'switch_group' && (
               <div className="model-group-field">
-                <FieldLabel>当前指向</FieldLabel>
+                <FieldLabel>Header 模板</FieldLabel>
                 <ModernSelect
-                  value={form.activeSourceRouteId ? String(form.activeSourceRouteId) : ''}
+                  data-testid="model-group-editor-switch-header-template"
+                  value={form.customHeaderTemplateId ? String(form.customHeaderTemplateId) : ''}
                   onChange={(value) => setForm((prev) => ({
                     ...prev,
-                    activeSourceRouteId: value ? Number(value) : null,
+                    customHeaderTemplateId: value ? Number(value) : null,
                   }))}
-                  options={[
-                    { value: '', label: '请选择当前目标', description: '保存后下游请求会转发到此目标' },
-                    ...selectedSwitchTargetRoutes.map((route) => ({
-                      value: String(route.id),
-                      label: getSourceTargetLabel(route),
-                      description: `${getSourceTargetTypeLabel(route)} / ${formatCount(route.enabledChannelCount, '可用通道')}`,
-                    })),
-                  ]}
+                  options={switchHeaderTemplateOptions}
                   searchable
-                  searchPlaceholder="搜索已选目标"
-                  emptyLabel="请先选择入口目标"
+                  searchPlaceholder="搜索模板"
+                  emptyLabel="暂无 Header 模板"
                 />
                 <div className="model-group-field-hint">
-                  {activeTargetRoute
-                    ? `当前下游请求会走 ${getSourceTargetLabel(activeTargetRoute)}。`
-                    : '选择一个已勾选目标作为当前承接入口。'}
+                  {selectedHeaderTemplate
+                    ? `请求时使用 ${selectedHeaderTemplate.name} 的 Header。`
+                    : '不选择模板时，沿用当前指向目标的 Header 处理。'}
                 </div>
+              </div>
+            )}
+
+            <div className="model-group-source-toolbar">
+              <div className="model-group-source-heading">
+                <div className="model-group-source-heading-copy">
+                  <FieldLabel>{form.mode === 'switch_group' ? '指向目标' : '成员模型'}</FieldLabel>
+                  <span>
+                    {form.mode === 'switch_group'
+                      ? (activeSwitchTarget
+                        ? getSwitchTargetOptionLabel(activeSwitchTarget)
+                        : (activeTargetRoute ? getSourceTargetLabel(activeTargetRoute) : `0 / ${switchModelTargetRoutes.length}`))
+                      : `${selectedSourceRoutes.length} / ${sourceCandidateRoutes.length}`}
+                  </span>
+                </div>
+                {form.mode !== 'switch_group' && (
+                  <div className="model-group-source-actions">
+                    <button
+                      type="button"
+                      className="model-group-source-action is-select"
+                      onClick={() => selectSourceRoutes(visibleSourceRoutes.map((route) => route.id))}
+                      disabled={visibleSourceRoutes.length === 0 || allVisibleSourcesSelected}
+                    >
+                      <SourceToolIcon type="select" />
+                      <span>{allVisibleSourcesSelected ? '已全选' : '全选'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="model-group-source-action is-clear"
+                      onClick={clearSourceRoutes}
+                      disabled={form.sourceRouteIds.length === 0}
+                    >
+                      <SourceToolIcon type="clear" />
+                      <span>清空</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+              {form.mode !== 'switch_group' && (
+                <div className="model-group-source-tools">
+                  <input
+                    type="search"
+                    value={sourceSearch}
+                    onChange={(event) => setSourceSearch(event.target.value)}
+                    placeholder="搜索来源模型"
+                  />
+                </div>
+              )}
+            </div>
+
+            {form.mode === 'switch_group' ? (
+              <div className="model-group-switch-target-grid">
+                <div className="model-group-field">
+                  <FieldLabel>选择分组或供应商</FieldLabel>
+                  <ModernSelect
+                    data-testid="model-group-editor-switch-source"
+                    value={selectedSwitchTargetSourceValue}
+                    onChange={selectSwitchTargetSource}
+                    options={switchTargetSourceOptions.map((source) => ({
+                      value: source.value,
+                      label: source.label,
+                      description: source.description,
+                      iconNode: getSwitchSourceKindPill(source.kind),
+                    }))}
+                    placeholder="选择分组或供应商"
+                    searchable
+                    searchPlaceholder="搜索分组或供应商"
+                    emptyLabel="暂无可选分组或供应商"
+                  />
+                </div>
+                <div className="model-group-field">
+                  <FieldLabel>选择模型</FieldLabel>
+                  <ModernSelect
+                    data-testid="model-group-editor-switch-model"
+                    value={activeSwitchTarget?.value || ''}
+                    onChange={selectSwitchTargetModel}
+                    options={selectedSwitchTargetSourceTargets.map((target) => ({
+                      value: target.value,
+                      label: getSwitchTargetOptionLabel(target),
+                      description: getSwitchTargetOptionDescription(target),
+                      iconNode: getSwitchTargetModelTypePill(),
+                    }))}
+                    placeholder="选择模型"
+                    searchable
+                    searchPlaceholder="搜索模型"
+                    emptyLabel={selectedSwitchTargetSourceValue ? '暂无可选模型' : '请先选择分组或供应商'}
+                    disabled={!selectedSwitchTargetSourceValue}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="model-group-source-list">
+                {filteredSourceRoutes.length === 0 ? (
+                <div className="model-group-source-empty">没有可选来源模型</div>
+                ) : filteredSourceRoutes.map(renderSourceRow)}
+              </div>
+            )}
+
+            {form.mode === 'switch_group' && activeTargetRoute && (
+              <div className="model-group-field-hint">
+                当前下游请求会走 {activeSwitchTarget ? getSwitchTargetOptionLabel(activeSwitchTarget) : getSourceTargetLabel(activeTargetRoute)}。
               </div>
             )}
 

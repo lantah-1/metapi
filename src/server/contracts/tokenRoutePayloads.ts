@@ -36,6 +36,7 @@ const tokenRouteCreatePayloadSchema = z.object({
   enabled: z.boolean().optional(),
   sourceRouteIds: z.array(z.number().int().positive()).optional(),
   activeSourceRouteId: z.union([z.number().int().positive(), z.null()]).optional(),
+  activeSourceSiteId: z.union([z.number().int().positive(), z.null()]).optional(),
   autoSourceQuery: z.union([z.string(), z.null()]).optional(),
 }).passthrough();
 
@@ -51,6 +52,7 @@ const tokenRouteUpdatePayloadSchema = z.object({
   enabled: z.boolean().optional(),
   sourceRouteIds: z.array(z.number().int().positive()).optional(),
   activeSourceRouteId: z.union([z.number().int().positive(), z.null()]).optional(),
+  activeSourceSiteId: z.union([z.number().int().positive(), z.null()]).optional(),
   autoSourceQuery: z.union([z.string(), z.null()]).optional(),
 }).passthrough();
 
@@ -114,6 +116,9 @@ function formatTokenRoutePayloadError(error: z.ZodError): string {
   }
   if (firstPath === 'activeSourceRouteId') {
     return 'Invalid activeSourceRouteId. Expected positive number or null.';
+  }
+  if (firstPath === 'activeSourceSiteId') {
+    return 'Invalid activeSourceSiteId. Expected positive number or null.';
   }
   if (firstPath === 'autoSourceQuery') {
     return 'Invalid autoSourceQuery. Expected string or null.';

@@ -72,6 +72,7 @@ describe('refreshModelsForAccount credential discovery', () => {
     refreshOauthAccessTokenSingleflightMock.mockReset();
 
     await db.delete(schema.routeChannels).run();
+    await db.delete(schema.routeGroupSources).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.tokenModelAvailability).run();
     await db.delete(schema.modelAvailability).run();
@@ -2228,5 +2229,154 @@ describe('refreshModelsForAccount credential discovery', () => {
     expect(channels[0]).toMatchObject({
       oauthRouteUnitId: routeUnit.id,
     });
+  });
+
+  it('auto-populates empty explicit groups from rebuilt exact model routes', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'Grouped Models',
+      url: 'https://grouped.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'group-a',
+      accessToken: 'access-group-a',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+    const accountB = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'group-b',
+      accessToken: 'access-group-b',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+    const tokenA = await db.insert(schema.accountTokens).values({
+      accountId: accountA.id,
+      name: 'token-a',
+      token: 'sk-group-a',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready' as any,
+    }).returning().get();
+    const tokenB = await db.insert(schema.accountTokens).values({
+      accountId: accountB.id,
+      name: 'token-b',
+      token: 'sk-group-b',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready' as any,
+    }).returning().get();
+    await db.insert(schema.tokenModelAvailability).values([
+      { tokenId: tokenA.id, modelName: 'openai/gpt-5.5', available: true },
+      { tokenId: tokenB.id, modelName: 'azure/gpt-5.5', available: true },
+      { tokenId: tokenA.id, modelName: 'unrelated-model', available: true },
+    ]).run();
+    const existingOpenAiRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'openai/gpt-5.5',
+      enabled: true,
+    }).returning().get();
+    const group = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.5',
+      displayName: 'gpt-5.5',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeGroupSources).values({
+      groupRouteId: group.id,
+      sourceRouteId: existingOpenAiRoute.id,
+    }).run();
+    const preservedExact = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'unrelated-model',
+      enabled: true,
+    }).returning().get();
+    const preservedGroup = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'manual-group',
+      displayName: 'manual-group',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeGroupSources).values({
+      groupRouteId: preservedGroup.id,
+      sourceRouteId: preservedExact.id,
+    }).run();
+
+    const rebuild = await rebuildTokenRoutesFromAvailability();
+
+    expect(rebuild.syncedGroupSourceGroups).toBe(1);
+    expect(rebuild.addedGroupSourceRoutes).toBe(1);
+    expect(rebuild.removedGroupSourceRoutes).toBe(0);
+    const exactRoutes = await db.select().from(schema.tokenRoutes).all();
+    const expectedSourceIds = exactRoutes
+      .filter((route) => route.modelPattern === 'openai/gpt-5.5' || route.modelPattern === 'azure/gpt-5.5')
+      .map((route) => route.id)
+      .sort((a, b) => a - b);
+    const groupSources = await db.select().from(schema.routeGroupSources)
+      .where(eq(schema.routeGroupSources.groupRouteId, group.id))
+      .all();
+    expect(groupSources.map((row) => row.sourceRouteId).sort((a, b) => a - b)).toEqual(expectedSourceIds);
+
+    const preservedSources = await db.select().from(schema.routeGroupSources)
+      .where(eq(schema.routeGroupSources.groupRouteId, preservedGroup.id))
+      .all();
+    expect(preservedSources.map((row) => row.sourceRouteId)).toEqual([preservedExact.id]);
+  });
+
+  it('removes explicit group members whose exact routes disappear during rebuild', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'Cleanup Models',
+      url: 'https://cleanup.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'cleanup-user',
+      accessToken: 'access-cleanup',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'cleanup-token',
+      token: 'sk-cleanup',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready' as any,
+    }).returning().get();
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id,
+      modelName: 'openai/gpt-5.5',
+      available: true,
+    }).run();
+    const staleRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'removed/gpt-5.5',
+      enabled: true,
+    }).returning().get();
+    const group = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.5',
+      displayName: 'gpt-5.5',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeGroupSources).values({
+      groupRouteId: group.id,
+      sourceRouteId: staleRoute.id,
+    }).run();
+
+    const rebuild = await rebuildTokenRoutesFromAvailability();
+
+    expect(rebuild.removedRoutes).toBe(1);
+    expect(rebuild.syncedGroupSourceGroups).toBe(1);
+    expect(rebuild.removedGroupSourceRoutes).toBe(0);
+    const groupSources = await db.select().from(schema.routeGroupSources)
+      .where(eq(schema.routeGroupSources.groupRouteId, group.id))
+      .all();
+    const exactRoutes = await db.select().from(schema.tokenRoutes).all();
+    const currentSourceIds = exactRoutes
+      .filter((route) => route.modelPattern === 'openai/gpt-5.5')
+      .map((route) => route.id);
+    expect(groupSources.map((row) => row.sourceRouteId)).toEqual(currentSourceIds);
   });
 });

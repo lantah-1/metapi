@@ -384,8 +384,20 @@ describe('PUT /api/routes/:id route rebuild', () => {
       enabledChannelCount: 1,
       siteNames: expect.arrayContaining([activeSource.site.name, disabledSource.site.name]),
       siteStatuses: expect.arrayContaining([
-        expect.objectContaining({ id: activeSource.site.id, name: activeSource.site.name, status: 'active' }),
-        expect.objectContaining({ id: disabledSource.site.id, name: disabledSource.site.name, status: 'disabled' }),
+        expect.objectContaining({
+          id: activeSource.site.id,
+          name: activeSource.site.name,
+          status: 'active',
+          channelCount: 1,
+          enabledChannelCount: 1,
+        }),
+        expect.objectContaining({
+          id: disabledSource.site.id,
+          name: disabledSource.site.name,
+          status: 'disabled',
+          channelCount: 1,
+          enabledChannelCount: 0,
+        }),
       ]),
     }));
 
@@ -443,6 +455,240 @@ describe('PUT /api/routes/:id route rebuild', () => {
     expect([...created.sourceRouteIds].sort((a, b) => a - b)).toEqual(
       [exactRouteA.id, exactRouteB.id].sort((a, b) => a - b),
     );
+  });
+
+  it('treats switch-group routing strategy as relay-only metadata', async () => {
+    const source = await seedAccountWithToken('any-gpt-5.5');
+    const exactRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'any-gpt-5.5',
+      enabled: true,
+      routingStrategy: 'round_robin',
+    }).returning().get();
+    await db.insert(schema.routeChannels).values({
+      routeId: exactRoute.id,
+      accountId: source.account.id,
+      tokenId: source.token.id,
+      sourceModel: 'any-gpt-5.5',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+    const headerTemplate = await db.insert(schema.routeHeaderTemplates).values({
+      name: 'Switch Header',
+      headers: JSON.stringify({ 'x-switch-template': '1' }),
+    }).returning().get();
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        routeMode: 'switch_group',
+        displayName: 'custom-gpt',
+        sourceRouteIds: [exactRoute.id],
+        activeSourceRouteId: exactRoute.id,
+        activeSourceSiteId: source.site.id,
+        routingStrategy: 'stable_first',
+        customHeaderTemplateId: headerTemplate.id,
+        customHeaders: '{"x-switch":"ignored"}',
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(200);
+    const created = createResponse.json() as {
+      id: number;
+      routeMode: string;
+      routingStrategy: string | null;
+      customHeaderTemplateId: number | null;
+      customHeaders: string | null;
+      activeSourceRouteId: number;
+      activeSourceSiteId: number;
+    };
+    expect(created).toMatchObject({
+      routeMode: 'switch_group',
+      routingStrategy: null,
+      customHeaderTemplateId: headerTemplate.id,
+      customHeaders: null,
+      activeSourceRouteId: exactRoute.id,
+      activeSourceSiteId: source.site.id,
+    });
+
+    const storedAfterCreate = await db.select().from(schema.tokenRoutes)
+      .where(eq(schema.tokenRoutes.id, created.id))
+      .get();
+    expect(storedAfterCreate?.routingStrategy).toBe('weighted');
+    expect(storedAfterCreate?.customHeaderTemplateId).toBe(headerTemplate.id);
+    expect(storedAfterCreate?.customHeaders).toBeNull();
+    expect(storedAfterCreate?.modelMapping).toBe(JSON.stringify({
+      activeSourceRouteId: exactRoute.id,
+      activeSourceSiteId: source.site.id,
+    }));
+
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/routes/${created.id}`,
+      payload: {
+        routingStrategy: 'stable_first',
+        customHeaderTemplateId: null,
+        customHeaders: '{"x-switch":"still-ignored"}',
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    expect((updateResponse.json() as { routingStrategy: string | null }).routingStrategy).toBeNull();
+    expect((updateResponse.json() as { customHeaderTemplateId: number | null }).customHeaderTemplateId).toBeNull();
+    expect((updateResponse.json() as { customHeaders: string | null }).customHeaders).toBeNull();
+
+    const summaryResponse = await app.inject({
+      method: 'GET',
+      url: '/api/routes/summary',
+    });
+    expect(summaryResponse.statusCode).toBe(200);
+    expect(summaryResponse.json()).toContainEqual(expect.objectContaining({
+      id: created.id,
+      routingStrategy: null,
+      customHeaderTemplateId: null,
+      customHeaders: null,
+      activeSourceRouteId: exactRoute.id,
+      activeSourceSiteId: source.site.id,
+    }));
+  });
+
+  it('rejects explicit groups as switch-group active targets', async () => {
+    const exactRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'any-gpt-5.5',
+      enabled: true,
+    }).returning().get();
+    const explicitGroup = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-public',
+      displayName: 'gpt-public',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeGroupSources).values({
+      groupRouteId: explicitGroup.id,
+      sourceRouteId: exactRoute.id,
+    }).run();
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        routeMode: 'switch_group',
+        displayName: 'custom-gpt',
+        sourceRouteIds: [explicitGroup.id],
+        activeSourceRouteId: explicitGroup.id,
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(400);
+    expect(createResponse.json()).toMatchObject({
+      success: false,
+      message: '切换分组只能选择精确模型路由作为入口目标',
+    });
+  });
+
+  it('rejects a switch-group supplier that does not belong to the active target', async () => {
+    const source = await seedAccountWithToken('any-gpt-5.5');
+    const other = await seedAccountWithToken('any-gpt-5.5');
+    const exactRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'any-gpt-5.5',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeChannels).values({
+      routeId: exactRoute.id,
+      accountId: source.account.id,
+      tokenId: source.token.id,
+      sourceModel: 'any-gpt-5.5',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        routeMode: 'switch_group',
+        displayName: 'custom-gpt',
+        sourceRouteIds: [exactRoute.id],
+        activeSourceRouteId: exactRoute.id,
+        activeSourceSiteId: other.site.id,
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(400);
+    expect(createResponse.json()).toMatchObject({
+      success: false,
+      message: '当前指向供应商必须属于已选择的入口目标',
+    });
+  });
+
+  it('clears the stored switch-group supplier when changing targets without a supplier', async () => {
+    const sourceA = await seedAccountWithToken('gpt-5.5-a');
+    const sourceB = await seedAccountWithToken('gpt-5.5-b');
+    const exactRouteA = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.5-a',
+      enabled: true,
+    }).returning().get();
+    const exactRouteB = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.5-b',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeChannels).values([
+      {
+        routeId: exactRouteA.id,
+        accountId: sourceA.account.id,
+        tokenId: sourceA.token.id,
+        sourceModel: 'gpt-5.5-a',
+        priority: 0,
+        weight: 10,
+        enabled: true,
+      },
+      {
+        routeId: exactRouteB.id,
+        accountId: sourceB.account.id,
+        tokenId: sourceB.token.id,
+        sourceModel: 'gpt-5.5-b',
+        priority: 0,
+        weight: 10,
+        enabled: true,
+      },
+    ]).run();
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        routeMode: 'switch_group',
+        displayName: 'custom-gpt',
+        sourceRouteIds: [exactRouteA.id],
+        activeSourceRouteId: exactRouteA.id,
+        activeSourceSiteId: sourceA.site.id,
+      },
+    });
+    expect(createResponse.statusCode).toBe(200);
+    const created = createResponse.json() as { id: number };
+
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: `/api/routes/${created.id}`,
+      payload: {
+        sourceRouteIds: [exactRouteB.id],
+        activeSourceRouteId: exactRouteB.id,
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    expect(updateResponse.json()).toMatchObject({
+      activeSourceRouteId: exactRouteB.id,
+      activeSourceSiteId: null,
+    });
+    const stored = await db.select().from(schema.tokenRoutes)
+      .where(eq(schema.tokenRoutes.id, created.id))
+      .get();
+    expect(JSON.parse(stored?.modelMapping || '{}')).toEqual({
+      activeSourceRouteId: exactRouteB.id,
+    });
   });
 
   it('syncs explicit-group routing strategy to unique source routes', async () => {

@@ -1,5 +1,6 @@
 export const ROUTE_DECISION_REFRESH_TASK_TYPE = 'route-decision.refresh';
 export const SWITCH_GROUP_ACTIVE_SOURCE_ROUTE_ID_KEY = 'activeSourceRouteId';
+export const SWITCH_GROUP_ACTIVE_SOURCE_SITE_ID_KEY = 'activeSourceSiteId';
 
 export function normalizeTokenRouteMode(routeMode) {
     if (routeMode === 'explicit_group') return 'explicit_group';
@@ -35,7 +36,13 @@ export function getSwitchGroupActiveSourceRouteId(modelMapping) {
     return normalizePositiveInteger(parsed[SWITCH_GROUP_ACTIVE_SOURCE_ROUTE_ID_KEY]);
 }
 
-export function serializeSwitchGroupModelMapping(modelMapping, activeSourceRouteId) {
+export function getSwitchGroupActiveSourceSiteId(modelMapping) {
+    const parsed = parseModelMappingRecord(modelMapping);
+    if (!parsed) return null;
+    return normalizePositiveInteger(parsed[SWITCH_GROUP_ACTIVE_SOURCE_SITE_ID_KEY]);
+}
+
+export function serializeSwitchGroupModelMapping(modelMapping, activeSourceRouteId, activeSourceSiteId) {
     const parsed = parseModelMappingRecord(modelMapping);
     const next = parsed ? { ...parsed } : {};
     const normalized = normalizePositiveInteger(activeSourceRouteId);
@@ -43,6 +50,12 @@ export function serializeSwitchGroupModelMapping(modelMapping, activeSourceRoute
         next[SWITCH_GROUP_ACTIVE_SOURCE_ROUTE_ID_KEY] = normalized;
     } else {
         delete next[SWITCH_GROUP_ACTIVE_SOURCE_ROUTE_ID_KEY];
+    }
+    const normalizedSiteId = normalizePositiveInteger(activeSourceSiteId);
+    if (normalizedSiteId) {
+        next[SWITCH_GROUP_ACTIVE_SOURCE_SITE_ID_KEY] = normalizedSiteId;
+    } else {
+        delete next[SWITCH_GROUP_ACTIVE_SOURCE_SITE_ID_KEY];
     }
     return JSON.stringify(next);
 }

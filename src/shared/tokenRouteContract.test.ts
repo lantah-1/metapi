@@ -16,4 +16,21 @@ describe('token route contract', () => {
     expect(normalizeTokenRouteMode(null)).toBe('pattern');
     expect(normalizeTokenRouteMode(undefined)).toBe('pattern');
   });
+
+  it('serializes switch group active route and supplier site ids', async () => {
+    const {
+      getSwitchGroupActiveSourceRouteId,
+      getSwitchGroupActiveSourceSiteId,
+      serializeSwitchGroupModelMapping,
+    } = await import('./tokenRouteContract.js');
+
+    const serialized = serializeSwitchGroupModelMapping(null, 11, 101);
+
+    expect(getSwitchGroupActiveSourceRouteId(serialized)).toBe(11);
+    expect(getSwitchGroupActiveSourceSiteId(serialized)).toBe(101);
+    expect(JSON.parse(serialized)).toEqual({
+      activeSourceRouteId: 11,
+      activeSourceSiteId: 101,
+    });
+  });
 });

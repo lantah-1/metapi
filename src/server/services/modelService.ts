@@ -32,6 +32,7 @@ import {
   discoverCodexModelsFromCloud,
   validateGeminiCliOauthConnection,
 } from './platformDiscoveryRegistry.js';
+import { syncExplicitGroupSourcesFromAutoMatch } from './routeSourceAutoMatchService.js';
 
 const API_TOKEN_DISCOVERY_TIMEOUT_MS = 8_000;
 const MODEL_DISCOVERY_TIMEOUT_MS = 12_000;
@@ -1233,7 +1234,16 @@ export async function rebuildTokenRoutesFromAvailability() {
     }
   }
 
-  if (createdRoutes > 0 || createdChannels > 0 || removedChannels > 0 || removedRoutes > 0) {
+  const syncedGroupSources = await syncExplicitGroupSourcesFromAutoMatch();
+
+  if (
+    createdRoutes > 0
+    || createdChannels > 0
+    || removedChannels > 0
+    || removedRoutes > 0
+    || syncedGroupSources.addedSourceRoutes > 0
+    || syncedGroupSources.removedSourceRoutes > 0
+  ) {
     await clearAllRouteDecisionSnapshots();
   }
 
@@ -1245,6 +1255,9 @@ export async function rebuildTokenRoutesFromAvailability() {
     createdChannels,
     removedChannels,
     removedRoutes,
+    syncedGroupSourceGroups: syncedGroupSources.updatedGroups,
+    addedGroupSourceRoutes: syncedGroupSources.addedSourceRoutes,
+    removedGroupSourceRoutes: syncedGroupSources.removedSourceRoutes,
   };
 }
 

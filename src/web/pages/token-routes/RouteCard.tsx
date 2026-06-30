@@ -43,6 +43,7 @@ import {
 import {
   isRouteExactModel,
   isExplicitGroupRoute,
+  isSwitchGroupRoute,
   resolveRouteTitle,
   resolveRouteIcon,
 } from './utils.js';
@@ -572,9 +573,11 @@ function RouteCardInner({
   const routeIcon = resolveRouteIcon(route);
   const exactRoute = isRouteExactModel(route);
   const explicitGroupRoute = isExplicitGroupRoute(route);
+  const switchGroupRoute = isSwitchGroupRoute(route);
   const explicitGroupSourceCount = Array.isArray(route.sourceRouteIds) ? route.sourceRouteIds.length : 0;
   const readOnlyRoute = route.kind === 'zero_channel' || route.readOnly === true || route.isVirtual === true;
-  const channelManagementDisabled = explicitGroupRoute;
+  const channelManagementDisabled = explicitGroupRoute || switchGroupRoute;
+  const showRoutingStrategyControls = !switchGroupRoute;
   const title = resolveRouteTitle(route);
   const routingStrategy = normalizeRouteRoutingStrategyValue(route.routingStrategy);
   const routingStrategyDescription = getRouteRoutingStrategyDescription(routingStrategy);
@@ -785,6 +788,14 @@ function RouteCardInner({
             <span className="badge badge-warning" style={{ fontSize: 10, flexShrink: 0 }}>
               {tr('0 通道')}
             </span>
+          ) : switchGroupRoute ? (
+            <span
+              className="badge badge-muted"
+              style={{ fontSize: 10, flexShrink: 0 }}
+              data-tooltip={tr('切换分组直接转发到当前精确模型')}
+            >
+              {tr('切换目标')}
+            </span>
           ) : (
             <span
               className="badge badge-muted"
@@ -985,7 +996,11 @@ function RouteCardInner({
         </div>
       )}
 
-      {!compact && explicitGroupRoute ? (
+      {!compact && switchGroupRoute ? (
+        <div style={{ fontSize: 11, lineHeight: 1.45, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+          {tr('切换分组只作为当前精确模型的公开入口；请求会直接转发到当前目标。')}
+        </div>
+      ) : !compact && explicitGroupRoute ? (
         <div style={{ fontSize: 11, lineHeight: 1.45, color: 'var(--color-text-muted)', marginBottom: 6 }}>
           {tr('该群组会将多个来源模型聚合为一个对外模型名；这里调整优先级桶时会直接回写来源通道。若某个来源模型被其他群组复用，保存前会提示影响范围。')}
         </div>
@@ -1021,7 +1036,7 @@ function RouteCardInner({
         </div>
       ) : null}
 
-      {!readOnlyRoute && (
+      {!readOnlyRoute && (showRoutingStrategyControls || showAddChannelButton) && (
         <div
           data-testid={compact ? 'compact-route-action-row' : undefined}
           style={{
@@ -1036,69 +1051,75 @@ function RouteCardInner({
         >
           {compact ? (
             <>
-              <div
-                style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}
-                data-tooltip={`${routingStrategyDescription} ${routingStrategyHint}`}
-              >
+              {showRoutingStrategyControls ? (
                 <div
-                  style={{ fontSize: 11.5, color: 'var(--color-text-secondary)', flexShrink: 0 }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}
+                  data-tooltip={`${routingStrategyDescription} ${routingStrategyHint}`}
                 >
-                  {tr('路由策略')}
+                  <div
+                    style={{ fontSize: 11.5, color: 'var(--color-text-secondary)', flexShrink: 0 }}
+                  >
+                    {tr('路由策略')}
+                  </div>
+                  <div
+                    data-testid="compact-route-strategy-select"
+                    style={{
+                      flex: '0 0 168px',
+                      minWidth: 168,
+                      maxWidth: 168,
+                    }}
+                  >
+                    <ModernSelect
+                      size="sm"
+                      value={routingStrategy}
+                      disabled={updatingRoutingStrategy}
+                      onChange={(nextValue) => onRoutingStrategyChange(route, nextValue as RouteRoutingStrategy)}
+                      options={routingStrategyOptions.map((option) => ({ value: option.value, label: option.label }))}
+                      placeholder={tr('选择路由策略')}
+                      emptyLabel={tr('暂无可选策略')}
+                    />
+                  </div>
                 </div>
-                <div
-                  data-testid="compact-route-strategy-select"
-                  style={{
-                    flex: '0 0 168px',
-                    minWidth: 168,
-                    maxWidth: 168,
-                  }}
-                >
-                  <ModernSelect
-                    size="sm"
-                    value={routingStrategy}
-                    disabled={updatingRoutingStrategy}
-                    onChange={(nextValue) => onRoutingStrategyChange(route, nextValue as RouteRoutingStrategy)}
-                    options={routingStrategyOptions.map((option) => ({ value: option.value, label: option.label }))}
-                    placeholder={tr('选择路由策略')}
-                    emptyLabel={tr('暂无可选策略')}
-                  />
-                </div>
-              </div>
+              ) : null}
               {showAddChannelButton ? renderAddChannelButton({ alignRight: true }) : null}
             </>
           ) : (
             <>
-              <div
-                style={{ fontSize: 11.5, color: 'var(--color-text-secondary)', minWidth: undefined }}
-                data-tooltip={undefined}
-              >
-                {tr('路由策略')}
-              </div>
-              <div
-                style={{
-                  minWidth: 220,
-                  maxWidth: 320,
-                  flex: '1 1 220px',
-                }}
-              >
-                <ModernSelect
-                  size="sm"
-                  value={routingStrategy}
-                  disabled={updatingRoutingStrategy}
-                  onChange={(nextValue) => onRoutingStrategyChange(route, nextValue as RouteRoutingStrategy)}
-                  options={routingStrategyOptions.map((option) => ({ ...option }))}
-                  placeholder={tr('选择路由策略')}
-                  emptyLabel={tr('暂无可选策略')}
-                />
-                <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  <div style={{ fontSize: 11.5, lineHeight: 1.45, color: 'var(--color-text-secondary)' }}>
-                    {routingStrategyDescription}
+              {showRoutingStrategyControls ? (
+                <>
+                  <div
+                    style={{ fontSize: 11.5, color: 'var(--color-text-secondary)', minWidth: undefined }}
+                    data-tooltip={undefined}
+                  >
+                    {tr('路由策略')}
                   </div>
-                  <div style={{ fontSize: 10.5, lineHeight: 1.4, color: 'var(--color-text-muted)' }}>
-                    {routingStrategyHint}
+                  <div
+                    style={{
+                      minWidth: 220,
+                      maxWidth: 320,
+                      flex: '1 1 220px',
+                    }}
+                  >
+                    <ModernSelect
+                      size="sm"
+                      value={routingStrategy}
+                      disabled={updatingRoutingStrategy}
+                      onChange={(nextValue) => onRoutingStrategyChange(route, nextValue as RouteRoutingStrategy)}
+                      options={routingStrategyOptions.map((option) => ({ ...option }))}
+                      placeholder={tr('选择路由策略')}
+                      emptyLabel={tr('暂无可选策略')}
+                    />
+                    <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <div style={{ fontSize: 11.5, lineHeight: 1.45, color: 'var(--color-text-secondary)' }}>
+                        {routingStrategyDescription}
+                      </div>
+                      <div style={{ fontSize: 10.5, lineHeight: 1.4, color: 'var(--color-text-muted)' }}>
+                        {routingStrategyHint}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
+                </>
+              ) : null}
             </>
           )}
         </div>
